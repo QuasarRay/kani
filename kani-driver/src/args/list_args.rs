@@ -55,30 +55,13 @@ pub enum Format {
 
 impl ValidateArgs for CargoListArgs {
     fn validate(&self) -> Result<(), Error> {
-        self.common_args.validate()?;
-
-        if self.format == Format::Pretty && self.common_args.quiet {
-            return Err(Error::raw(
-                ErrorKind::ArgumentConflict,
-                "The `--quiet` flag is not compatible with the `pretty` format, since `pretty` prints to the terminal. Either specify a different format or don't pass `--quiet`.",
-            ));
-        }
-
-        Ok(())
+        validate_list(&self.common_args, self.format)
     }
 }
 
 impl ValidateArgs for StandaloneListArgs {
     fn validate(&self) -> Result<(), Error> {
-        self.common_args.validate()?;
-
-        if self.format == Format::Pretty && self.common_args.quiet {
-            return Err(Error::raw(
-                ErrorKind::ArgumentConflict,
-                "The `--quiet` flag is not compatible with the `pretty` format, since `pretty` prints to the terminal. Either specify a different format or don't pass `--quiet`.",
-            ));
-        }
-
+        validate_list(&self.common_args, self.format)?;
         if self.std {
             validate_std_path(&self.input)
         } else if self.input.is_file() {
@@ -92,5 +75,17 @@ impl ValidateArgs for StandaloneListArgs {
                 ),
             ))
         }
+    }
+}
+
+fn validate_list(common: &CommonArgs, format: Format) -> Result<(), Error> {
+    common.validate()?;
+    if format == Format::Pretty && common.quiet {
+        Err(Error::raw(
+            ErrorKind::ArgumentConflict,
+            "The `--quiet` flag is not compatible with the `pretty` format, since `pretty` prints to the terminal. Either specify a different format or don't pass `--quiet`.",
+        ))
+    } else {
+        Ok(())
     }
 }

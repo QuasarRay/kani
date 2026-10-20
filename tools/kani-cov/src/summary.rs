@@ -3,21 +3,16 @@
 
 //! This module includes the implementation of the `summary` subcommand.
 
-use std::{
-    cmp::max,
-    fs::File,
-    io::BufReader,
-    path::{Path, PathBuf},
-};
+use std::path::Path;
 
 use anyhow::Result;
 
 use crate::{
     args::{SummaryArgs, SummaryFormat},
     coverage::{
-        CombinedCoverageResults, CovResult, CoverageMetric, CoverageRegion, FileCoverageInfo,
-        Function, FunctionInfo, LineNumber, MarkerInfo, function_coverage_results,
-        function_info_from_file,
+        CovResult, CoverageMetric, CoverageRegion, FileCoverageInfo, Function, FunctionInfo,
+        LineNumber, MarkerInfo, function_coverage_results, function_info_from_file,
+        load_coverage_inputs,
     },
 };
 
@@ -28,16 +23,7 @@ use crate::{
 /// associated coverage information on a per-function basis, producing coverage
 /// metrics for each one of the files.
 pub fn summary_main(args: &SummaryArgs) -> Result<()> {
-    let mapfile = File::open(&args.mapfile)?;
-    let reader = BufReader::new(mapfile);
-
-    let covfile = File::open(&args.profile)?;
-    let covreader = BufReader::new(covfile);
-    let results: CombinedCoverageResults =
-        serde_json::from_reader(covreader).expect("could not load coverage results");
-
-    let source_files: Vec<PathBuf> =
-        serde_json::from_reader(reader).expect("could not parse coverage metadata");
+    let (results, source_files) = load_coverage_inputs(&args.mapfile, &args.profile)?;
 
     let mut all_cov_info: Vec<FileCoverageInfo> = Vec::new();
 
@@ -89,7 +75,7 @@ fn calculate_cov_info(file: &Path, file_cov_info: &[FunctionCoverageResults]) ->
 }
 
 fn function_coverage_info(cov_results: &Option<(Function, Vec<CovResult>)>) -> bool {
-    if let Some(res) = cov_results { res.1.iter().any(|c| c.times_covered > 0) } else { false }
+    cov_results.as_ref().is_some_and(|res| res.1.iter().any(|c| c.times_covered > 0))
 }
 
 /// Function coverage results
@@ -101,12 +87,6 @@ struct FunctionCoverageResults {
     total_regions: usize,
 }
 
-/// Validate arguments to the `summary` subcommand in addition to clap's
-/// validation.
-pub fn validate_summary_args(_args: &SummaryArgs) -> Result<()> {
-    // No validation is done at the moment
-    Ok(())
-}
 
 /// Computes coverage results from a line-based perspective.
 ///
@@ -181,120 +161,66 @@ pub fn line_coverage_info(
     let line_status = line_coverage_results(info, fun_results);
     let total_lines = line_status.iter().filter(|s| s.is_some()).count();
     let covered_lines =
-        line_status.iter().filter(|s| s.is_some() && s.as_ref().unwrap().0 > 0).count();
+        line_status.iter().filter(|s| s.as_ref().is_some_and(|(count, _)| *count > 0)).count();
     (covered_lines, total_lines)
 }
 
 /// Compute the number of covered regions and number of total regions given the
 /// coverage results for a given function.
 fn region_coverage_info(fun_results: &Option<(Function, Vec<CovResult>)>) -> (usize, usize) {
-    if let Some(res) = fun_results {
-        let total_regions = res.1.len();
-        let covered_regions = res.1.iter().filter(|c| c.times_covered > 0).count();
-        (covered_regions, total_regions)
-    } else {
-        (0, 0)
-    }
+    fun_results.as_ref().map_or((0, 0), |res| {
+        (res.1.iter().filter(|c| c.times_covered > 0).count(), res.1.len())
+    })
 }
 
 /// Output coverage information for a set of files
-fn print_coverage_info(info: &Vec<FileCoverageInfo>, format: &SummaryFormat) {
+fn print_coverage_info(info: &[FileCoverageInfo], format: &SummaryFormat) {
     match format {
         SummaryFormat::Markdown => print_coverage_markdown_info(info),
-        // SummaryFormat::Json => print_coverage_json_info(info),
     }
 }
 
 /// Output coverage information for a set of files in the markdown format
-fn print_coverage_markdown_info(info: &Vec<FileCoverageInfo>) {
-    fn safe_div(num: usize, denom: usize) -> Option<f32> {
-        if denom == 0 { None } else { Some(num as f32 / denom as f32) }
+fn print_coverage_markdown_info(info: &[FileCoverageInfo]) {
+    const HEADERS: [&str; 4] = ["Filename", "Function (%)", "Line (%)", "Region (%)"];
+
+    fn metric(metric: &CoverageMetric) -> String {
+        let rate = if metric.total == 0 {
+            "N/A".to_string()
+        } else {
+            format!("{:.2}", metric.covered as f32 / metric.total as f32 * 100_f32)
+        };
+        format!("{}/{} ({rate})", metric.covered, metric.total)
     }
 
-    const HEADERS_ROWS: usize = 3;
-    const FILENAME_HEADER: &str = "Filename";
-    const FUNCTION_HEADER: &str = "Function (%)";
-    const LINE_HEADER: &str = "Line (%)";
-    const REGION_HEADER: &str = "Region (%)";
+    let rows = info
+        .iter()
+        .map(|info| {
+            [
+                info.filename.clone(),
+                metric(&info.function),
+                metric(&info.line),
+                metric(&info.region),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let widths = std::array::from_fn(|i| {
+        rows.iter().map(|row| row[i].len()).max().unwrap_or(0).max(HEADERS[i].len())
+    });
+    let row = |cells: [&str; 4]| {
+        format!(
+            "| {} |",
+            cells
+                .into_iter()
+                .zip(widths)
+                .map(|(cell, width)| format!("{cell:<width$}"))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )
+    };
 
-    let mut table_rows: Vec<String> = Vec::with_capacity(HEADERS_ROWS + info.len() + 1);
-    let mut max_filename_fmt_width = FILENAME_HEADER.len();
-    let mut max_function_fmt_width = FUNCTION_HEADER.len();
-    let mut max_line_fmt_width = LINE_HEADER.len();
-    let mut max_region_fmt_width = REGION_HEADER.len();
-
-    let mut data_rows: Vec<(String, String, String, String)> = Vec::with_capacity(info.len());
-
-    for cov_info in info {
-        let filename = cov_info.filename.to_string();
-
-        let function_covered = cov_info.function.covered;
-        let function_total = cov_info.function.total;
-        let function_rate = safe_div(function_covered, function_total);
-        let function_rate_fmt = if let Some(rate) = function_rate {
-            format!("{:.2}", (rate * 100_f32))
-        } else {
-            "N/A".to_string()
-        };
-        let function_fmt = format!("{function_covered}/{function_total} ({function_rate_fmt})");
-
-        let line_covered = cov_info.line.covered;
-        let line_total = cov_info.line.total;
-        let line_rate = safe_div(line_covered, line_total);
-        let line_rate_fmt = if let Some(rate) = line_rate {
-            format!("{:.2}", (rate * 100_f32))
-        } else {
-            "N/A".to_string()
-        };
-        let line_fmt = format!("{line_covered}/{line_total} ({line_rate_fmt})");
-
-        let region_covered = cov_info.region.covered;
-        let region_total = cov_info.region.total;
-        let region_rate = safe_div(region_covered, region_total);
-        let region_rate_fmt = if let Some(rate) = region_rate {
-            format!("{:.2}", (rate * 100_f32))
-        } else {
-            "N/A".to_string()
-        };
-        let region_fmt = format!("{region_covered}/{region_total} ({region_rate_fmt})");
-
-        max_filename_fmt_width = max(max_filename_fmt_width, filename.len());
-        max_function_fmt_width = max(max_function_fmt_width, function_fmt.len());
-        max_line_fmt_width = max(max_line_fmt_width, line_fmt.len());
-        max_region_fmt_width = max(max_region_fmt_width, region_fmt.len());
-
-        data_rows.push((filename, function_fmt, line_fmt, region_fmt));
-    }
-
-    let filename_space = " ".repeat(max_filename_fmt_width - FILENAME_HEADER.len());
-    let function_space = " ".repeat(max_function_fmt_width - FUNCTION_HEADER.len());
-    let line_space = " ".repeat(max_line_fmt_width - LINE_HEADER.len());
-    let region_space = " ".repeat(max_region_fmt_width - REGION_HEADER.len());
-
-    let header_row = format!(
-        "| {FILENAME_HEADER}{filename_space} | {FUNCTION_HEADER}{function_space} | {LINE_HEADER}{line_space} | {REGION_HEADER}{region_space} |"
-    );
-    table_rows.push(header_row);
-
-    let filename_sep = "-".repeat(max_filename_fmt_width);
-    let function_sep = "-".repeat(max_function_fmt_width);
-    let line_sep = "-".repeat(max_line_fmt_width);
-    let region_sep = "-".repeat(max_region_fmt_width);
-
-    let sep_row = format!("| {filename_sep} | {function_sep} | {line_sep} | {region_sep} |");
-    table_rows.push(sep_row);
-
-    for (filename, function_fmt, line_fmt, region_fmt) in data_rows {
-        let filename_space = " ".repeat(max_filename_fmt_width - filename.len());
-        let function_space = " ".repeat(max_function_fmt_width - function_fmt.len());
-        let line_space = " ".repeat(max_line_fmt_width - line_fmt.len());
-        let region_space = " ".repeat(max_region_fmt_width - region_fmt.len());
-
-        let cur_row = format!(
-            "| {filename}{filename_space} | {function_fmt}{function_space} | {line_fmt}{line_space} | {region_fmt}{region_space} |"
-        );
-        table_rows.push(cur_row);
-    }
-
-    println!("{}", table_rows.join("\n"));
+    let header = row(HEADERS);
+    let separator = format!("| {} |", widths.map(|width| "-".repeat(width)).join(" | "));
+    let data = rows.iter().map(|cells| row(cells.each_ref().map(String::as_str)));
+    println!("{}", [header, separator].into_iter().chain(data).collect::<Vec<_>>().join("\n"));
 }

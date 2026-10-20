@@ -527,43 +527,24 @@ pub fn postprocess_result(properties: Vec<Property>, extra_ptr_checks: bool) -> 
     let (properties_with_undefined, has_reachable_undefined_functions) =
         modify_undefined_function_checks(properties);
     // Split all properties into two groups: Regular properties and reachability checks
-    let (properties_without_reachs, reach_checks) = filter_reach_checks(properties_with_undefined);
-    // Filter out successful sanity checks introduced during compilation
-    let properties_without_sanity_checks = filter_sanity_checks(properties_without_reachs);
-    // Annotate properties with the results of reachability checks
-    let properties_annotated =
-        annotate_properties_with_reach_results(properties_without_sanity_checks, reach_checks);
-    // Remove reachability check IDs from regular property descriptions
-    let properties_without_ids = remove_check_ids_from_description(properties_annotated);
-
-    // Filter out extra pointer checks if needed
-    let properties_filtered = if !extra_ptr_checks {
-        filter_ptr_checks(properties_without_ids)
-    } else {
-        properties_without_ids
-    };
+    let (properties, reach_checks) = split_properties(properties_with_undefined);
+    // Annotate properties with the results of reachability checks.
+    let properties_annotated = annotate_properties_with_reach_results(properties, reach_checks);
     let has_fundamental_failures = has_reachable_unsupported_constructs
         || has_failed_unwinding_asserts
         || has_reachable_undefined_functions;
-
-    let updated_properties =
-        update_properties_with_reach_status(properties_filtered, has_fundamental_failures);
-    let results_after_code_coverage = update_results_of_code_covererage_checks(updated_properties);
-    update_results_of_cover_checks(results_after_code_coverage)
+    finalize_properties(properties_annotated, extra_ptr_checks, has_fundamental_failures)
 }
 
 /// Determines if there is property with status `FAILURE` and the given description
-fn has_check_failure(properties: &Vec<Property>, description: &str) -> bool {
-    for prop in properties {
-        if prop.status == CheckStatus::Failure && prop.description.contains(description) {
-            return true;
-        }
-    }
-    false
+fn has_check_failure(properties: &[Property], description: &str) -> bool {
+    properties
+        .iter()
+        .any(|prop| prop.status == CheckStatus::Failure && prop.description.contains(description))
 }
 
 // Determines if there were unwinding assertion failures in a set of properties
-fn has_unwinding_assertion_failures(properties: &Vec<Property>) -> bool {
+fn has_unwinding_assertion_failures(properties: &[Property]) -> bool {
     has_check_failure(properties, UNWINDING_ASSERT_DESC)
         || has_check_failure(properties, UNWINDING_ASSERT_REC_DESC)
 }
@@ -578,14 +559,9 @@ fn modify_undefined_function_checks(mut properties: Vec<Property>) -> (Vec<Prope
         {
             // Missing functions come with mangled names.
             // `demangle` produces the demangled version if it's a mangled name.
-            let modified_description = format!(
-                "Function `{:#}` with missing definition is unreachable",
-                demangle(function)
-            );
-            prop.description = modified_description;
-            if prop.status == CheckStatus::Failure {
-                has_unknown_location_checks = true;
-            }
+            prop.description =
+                format!("Function `{:#}` with missing definition is unreachable", demangle(function));
+            has_unknown_location_checks |= prop.status == CheckStatus::Failure;
         };
     }
     (properties, has_unknown_location_checks)
@@ -606,61 +582,45 @@ fn modify_undefined_function_checks(mut properties: Vec<Property>) -> (Vec<Prope
 /// temporary variable in their descriptions.
 fn get_readable_description(property: &Property) -> String {
     let original = property.description.clone();
-    let class_id = property.property_class();
-
-    let description_alternatives = CBMC_ALT_DESCRIPTIONS.get(&class_id as &str);
-    if let Some(alt_descriptions) = description_alternatives {
-        for (desc_to_match, opt_desc_to_replace) in alt_descriptions {
-            if original.contains(desc_to_match) {
-                if let Some(desc_to_replace) = opt_desc_to_replace {
-                    return desc_to_replace.to_string();
-                } else {
-                    return desc_to_match.to_string();
-                }
-            }
-        }
-    }
-    original
+    CBMC_ALT_DESCRIPTIONS
+        .get(property.property_class().as_str())
+        .and_then(|alternatives| {
+            alternatives.iter().find(|(description, _)| original.contains(description))
+        })
+        .map(|(description, replacement)| replacement.unwrap_or(*description).to_string())
+        .unwrap_or(original)
 }
 
-/// Performs a pass to update all properties as follows:
-///  1. Descriptions are replaced with more readable ones.
-///  2. If there were failures that made the verification result unreliable
-///     (e.g., a reachable unsupported construct), changes all `SUCCESS` results
-///     to `UNDETERMINED`.
-///  3. If there weren't such failures, it updates all results with a `SUCCESS`
-///     reachability check to `UNREACHABLE`.
-fn update_properties_with_reach_status(
+/// Apply the ordered final property transformations after reachability annotation.
+fn finalize_properties(
     mut properties: Vec<Property>,
+    extra_ptr_checks: bool,
     has_fundamental_failures: bool,
 ) -> Vec<Property> {
-    for prop in properties.iter_mut() {
+    let check_id = Regex::new(r"\[KANI_CHECK_ID_([^\]]*)\] ").unwrap();
+    for prop in &mut properties {
+        prop.description = check_id.replace(&prop.description, "").to_string();
+    }
+    if !extra_ptr_checks {
+        properties.retain(|prop| {
+            let class = prop.property_class();
+            !class.contains("pointer_arithmetic") && !class.contains("pointer_primitives")
+        });
+    }
+
+    for prop in &mut properties {
         prop.description = get_readable_description(prop);
-        if has_fundamental_failures {
-            if prop.status == CheckStatus::Success {
-                prop.status = CheckStatus::Undetermined;
-            }
-        } else if prop.reach.is_some() && prop.reach.unwrap() == CheckStatus::Success {
-            let description = &prop.description;
+        if has_fundamental_failures && prop.status == CheckStatus::Success {
+            prop.status = CheckStatus::Undetermined;
+        } else if !has_fundamental_failures && prop.reach == Some(CheckStatus::Success) {
             assert!(
                 prop.status == CheckStatus::Success,
-                "** ERROR: Expecting the unreachable property \"{description}\" to have a status of \"SUCCESS\""
+                "** ERROR: Expecting the unreachable property \"{}\" to have a status of \"SUCCESS\"",
+                prop.description
             );
-            prop.status = CheckStatus::Unreachable
+            prop.status = CheckStatus::Unreachable;
         }
-    }
-    properties
-}
 
-/// Update the results of `code_coverage` (NOT `cover`) properties.
-/// - `SUCCESS` -> `UNCOVERED`
-/// - `FAILURE` -> `COVERED`
-///
-/// Note that these statuses are intermediate statuses that aren't reported to
-/// users but rather internally consumed and reported finally as `PARTIAL`, `FULL`
-/// or `NONE` based on aggregated line coverage results.
-fn update_results_of_code_covererage_checks(mut properties: Vec<Property>) -> Vec<Property> {
-    for prop in properties.iter_mut() {
         if prop.is_code_coverage_property() {
             prop.status = match prop.status {
                 CheckStatus::Success => CheckStatus::Uncovered,
@@ -670,66 +630,29 @@ fn update_results_of_code_covererage_checks(mut properties: Vec<Property>) -> Ve
                 ),
             };
         }
-    }
-    properties
-}
-
-/// Update the results of cover properties.
-/// We encode cover(cond) as assert(!cond), so if the assertion
-/// fails, then the cover property is satisfied and vice versa:
-/// - SUCCESS -> UNSATISFIABLE
-/// - FAILURE -> SATISFIED
-///
-/// Note that if the cover property was unreachable, its status at this point
-/// will be `CheckStatus::Unreachable` and not `CheckStatus::Success` since
-/// `update_properties_with_reach_status` is called beforehand
-fn update_results_of_cover_checks(mut properties: Vec<Property>) -> Vec<Property> {
-    for prop in properties.iter_mut() {
         if prop.is_cover_property() {
-            if prop.status == CheckStatus::Success {
-                prop.status = CheckStatus::Unsatisfiable;
-            } else if prop.status == CheckStatus::Failure {
-                prop.status = CheckStatus::Satisfied;
-            }
+            prop.status = match prop.status {
+                CheckStatus::Success => CheckStatus::Unsatisfiable,
+                CheckStatus::Failure => CheckStatus::Satisfied,
+                status => status,
+            };
         }
     }
     properties
 }
-/// Some Kani-generated asserts have a unique ID in their description of the form:
-/// ```text
-/// [KANI_CHECK_ID_<crate-fn-name>_<index>]
-/// ```
-/// e.g.:
-/// ```text
-/// [KANI_CHECK_ID_foo.6875c808::foo_0] assertion failed: x % 2 == 0
-/// ```
-/// This function removes those IDs from the property's description so that
-/// they're not shown to the user. The removal of the IDs should only be done
-/// after all ID-based post-processing is done.
-fn remove_check_ids_from_description(mut properties: Vec<Property>) -> Vec<Property> {
-    let check_id_pat = Regex::new(r"\[KANI_CHECK_ID_([^\]]*)\] ").unwrap();
-    for prop in properties.iter_mut() {
-        prop.description = check_id_pat.replace(&prop.description, "").to_string();
+
+/// Split reachability checks from user-facing properties, dropping successful sanity checks.
+fn split_properties(properties: Vec<Property>) -> (Vec<Property>, Vec<Property>) {
+    let mut regular = vec![];
+    let mut reach = vec![];
+    for prop in properties {
+        match prop.property_class().as_str() {
+            "reachability_check" => reach.push(prop),
+            "sanity_check" if prop.status == CheckStatus::Success => {}
+            _ => regular.push(prop),
+        }
     }
-    properties
-}
-
-/// Partitions `properties` into reachability checks (identified by the
-/// "reachability_check" property class) and non-reachability checks
-fn filter_reach_checks(properties: Vec<Property>) -> (Vec<Property>, Vec<Property>) {
-    let (reach_checks, other_checks): (Vec<_>, Vec<_>) =
-        properties.into_iter().partition(|prop| prop.property_class() == "reachability_check");
-    (other_checks, reach_checks)
-}
-
-/// Filters out Kani-generated sanity checks with a `SUCCESS` status
-fn filter_sanity_checks(properties: Vec<Property>) -> Vec<Property> {
-    properties
-        .into_iter()
-        .filter(|prop| {
-            !(prop.property_class() == "sanity_check" && prop.status == CheckStatus::Success)
-        })
-        .collect()
+    (regular, reach)
 }
 
 /// Filters out properties related to extra pointer checks
@@ -786,24 +709,19 @@ fn annotate_properties_with_reach_results(
     }
 
     let check_marker_pat = Regex::new(r"\[KANI_CHECK_ID_([^\]]*)\]").unwrap();
-    for prop in properties.iter_mut() {
-        let description = &prop.description;
-        if check_marker_pat.is_match(description) {
-            // Capture the ID in the property
-            let prop_match_id =
-                check_marker_pat.captures(description.as_str()).unwrap().get(0).unwrap().as_str();
-            // Get the status associated to the ID we captured
-            let reach_status_opt = reach_map.get(prop_match_id);
-            // Update the reachability status of the property
-            if let Some(reach_status) = reach_status_opt {
-                for status in reach_status {
-                    // Report if any copy of `prop` is not success.
-                    if prop.reach.is_none()
-                        || prop.reach.unwrap() == CheckStatus::Satisfied
-                        || prop.reach.unwrap() == CheckStatus::Success
-                    {
-                        prop.reach = Some(*status);
-                    }
+    for prop in &mut properties {
+        let Some(id) =
+            check_marker_pat.captures(&prop.description).and_then(|captures| captures.get(0))
+        else {
+            continue;
+        };
+        if let Some(statuses) = reach_map.get(id.as_str()) {
+            for status in statuses {
+                // Report if any copy of `prop` is not success.
+                if prop.reach.is_none_or(|reach| {
+                    matches!(reach, CheckStatus::Satisfied | CheckStatus::Success)
+                }) {
+                    prop.reach = Some(*status);
                 }
             }
         }

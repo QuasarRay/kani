@@ -49,8 +49,7 @@ impl ValidateArgs for CommonArgs {
 
         // Warn if a deprecated unstable feature is enabled.
         for feature in self.unstable_features.iter() {
-            let stabilization_version = feature.stabilization_version();
-            if let Some(version) = stabilization_version {
+            if let Some(version) = feature.stabilization_version() {
                 print_stabilized_feature_warning(self, *feature, &version);
             }
         }

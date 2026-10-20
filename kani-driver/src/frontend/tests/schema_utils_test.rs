@@ -17,6 +17,62 @@ use crate::project::Project;
 use kani_metadata::{HarnessAttributes, HarnessKind, HarnessMetadata, KaniMetadata};
 use std::path::PathBuf;
 use std::time::Duration;
+
+fn harness(name: &str, file: &str) -> HarnessMetadata {
+    HarnessMetadata {
+        pretty_name: name.into(),
+        mangled_name: name.replace("::", "_"),
+        crate_name: "sample".into(),
+        original_file: file.into(),
+        original_start_line: 1,
+        original_end_line: 2,
+        goto_file: None,
+        attributes: HarnessAttributes::new(HarnessKind::Proof),
+        contract: None,
+        has_loop_contracts: false,
+        is_automatically_generated: false,
+        is_bounded: false,
+        is_ctor_based: false,
+    }
+}
+
+fn property(
+    id: u32,
+    function: &str,
+    class: &str,
+    status: CheckStatus,
+    description: &str,
+    file: &str,
+    line: &str,
+    column: &str,
+) -> Property {
+    Property {
+        property_id: PropertyId { id, fn_name: Some(function.into()), class: class.into() },
+        status,
+        description: description.into(),
+        source_location: SourceLocation {
+            file: Some(file.into()),
+            function: Some(function.into()),
+            line: Some(line.into()),
+            column: Some(column.into()),
+        },
+        reach: None,
+        trace: None,
+    }
+}
+
+fn failure_result(results: Result<Vec<Property>, ExitStatus>) -> VerificationResult {
+    VerificationResult {
+        status: VerificationStatus::Failure,
+        failed_properties: FailedProperties::Other,
+        results,
+        runtime: Duration::from_millis(120),
+        generated_concrete_test: false,
+        ignored_quantifiers: 0,
+        coverage_results: None,
+        cbmc_stats: None,
+    }
+}
 #[test]
 fn test_create_metadata_json() {
     let json = create_metadata_json();
@@ -50,24 +106,17 @@ fn test_create_project_metadata_json() {
 
 #[test]
 fn test_create_harness_metadata_json() {
-    let harness = HarnessMetadata {
-        pretty_name: "crate::mod::my_harness".to_string(),
-        mangled_name: "mangled::harness".to_string(),
-        crate_name: "sample_crate".to_string(),
-        original_file: "src/lib.rs".to_string(),
-        original_start_line: 10,
-        original_end_line: 20,
-        goto_file: Some(PathBuf::from("target/goto_file.goto")),
-        attributes: HarnessAttributes::new(HarnessKind::Proof),
-        contract: None,
-        has_loop_contracts: true,
-        // Bounded and constructor-based harnesses are always automatically generated; check
-        // that all three flags are serialized so that JSON consumers can tell an autoharness
-        // run that under-approximates apart from one that does not.
-        is_automatically_generated: true,
-        is_bounded: true,
-        is_ctor_based: true,
-    };
+    let mut harness = harness("crate::mod::my_harness", "src/lib.rs");
+    harness.mangled_name = "mangled::harness".into();
+    harness.crate_name = "sample_crate".into();
+    harness.original_start_line = 10;
+    harness.original_end_line = 20;
+    harness.goto_file = Some("target/goto_file.goto".into());
+    harness.has_loop_contracts = true;
+    // Check that JSON consumers can distinguish bounded/constructor-based autoharnesses.
+    harness.is_automatically_generated = true;
+    harness.is_bounded = true;
+    harness.is_ctor_based = true;
 
     let json = create_harness_metadata_json(&harness);
 
@@ -84,69 +133,25 @@ fn test_create_harness_metadata_json() {
 
 #[test]
 fn test_create_verification_result_json() {
-    let harness = HarnessMetadata {
-        pretty_name: "crate::my_harness".to_string(),
-        mangled_name: "mangled_name".to_string(),
-        crate_name: "sample_crate".to_string(),
-        original_file: "src/lib.rs".to_string(),
-        original_start_line: 1,
-        original_end_line: 2,
-        goto_file: None,
-        attributes: HarnessAttributes::new(HarnessKind::Proof),
-        contract: None,
-        has_loop_contracts: false,
-        is_automatically_generated: false,
-        is_bounded: false,
-        is_ctor_based: false,
-    };
+    let mut harness = harness("crate::my_harness", "src/lib.rs");
+    harness.mangled_name = "mangled_name".into();
+    harness.crate_name = "sample_crate".into();
 
     let properties = vec![
-        Property {
-            property_id: PropertyId {
-                id: 1,
-                fn_name: Some("foo".to_string()),
-                class: "safety".to_string(),
-            },
-            status: CheckStatus::Success,
-            description: "no overflow".to_string(),
-            source_location: SourceLocation {
-                file: Some("src/lib.rs".to_string()),
-                function: Some("foo".to_string()),
-                line: Some("42".to_string()),
-                column: Some("5".to_string()),
-            },
-            reach: None,
-            trace: None,
-        },
-        Property {
-            property_id: PropertyId {
-                id: 2,
-                fn_name: Some("bar".to_string()),
-                class: "assertion".to_string(),
-            },
-            status: CheckStatus::Failure,
-            description: "assert failed".to_string(),
-            source_location: SourceLocation {
-                file: Some("src/main.rs".to_string()),
-                function: Some("bar".to_string()),
-                line: Some("10".to_string()),
-                column: Some("3".to_string()),
-            },
-            reach: None,
-            trace: None,
-        },
+        property(1, "foo", "safety", CheckStatus::Success, "no overflow", "src/lib.rs", "42", "5"),
+        property(
+            2,
+            "bar",
+            "assertion",
+            CheckStatus::Failure,
+            "assert failed",
+            "src/main.rs",
+            "10",
+            "3",
+        ),
     ];
 
-    let verification_result = VerificationResult {
-        status: VerificationStatus::Failure,
-        failed_properties: FailedProperties::Other,
-        results: Ok(properties),
-        runtime: Duration::from_millis(120),
-        generated_concrete_test: false,
-        ignored_quantifiers: 0,
-        coverage_results: None,
-        cbmc_stats: None,
-    };
+    let verification_result = failure_result(Ok(properties));
 
     let harness_result = HarnessResult { harness: &harness, result: verification_result };
 
@@ -165,24 +170,9 @@ fn test_create_verification_result_json() {
 
 #[test]
 fn test_create_verification_summary_json_real() {
-    // Create a real harness
-    let harness = HarnessMetadata {
-        pretty_name: "foo::harness_ok".into(),
-        mangled_name: "foo_harness_ok".into(),
-        crate_name: "sample".into(),
-        original_file: "src/lib.rs".into(),
-        original_start_line: 10,
-        original_end_line: 20,
-        goto_file: None,
-        attributes: HarnessAttributes::new(HarnessKind::Proof),
-        contract: None,
-        has_loop_contracts: false,
-        is_automatically_generated: false,
-        is_bounded: false,
-        is_ctor_based: false,
-    };
-
-    // Create a VerificationResult
+    let mut harness = harness("foo::harness_ok", "src/lib.rs");
+    harness.original_start_line = 10;
+    harness.original_end_line = 20;
     let verification_result = VerificationResult::mock_success();
 
     let harness_result = HarnessResult { harness: &harness, result: verification_result };
@@ -199,32 +189,10 @@ fn test_create_verification_summary_json_real() {
 
 #[test]
 fn test_add_runner_results_to_json_real() {
-    let harness = HarnessMetadata {
-        pretty_name: "bar::harness_fail".into(),
-        mangled_name: "bar_harness_fail".into(),
-        crate_name: "sample".into(),
-        original_file: "src/main.rs".into(),
-        original_start_line: 5,
-        original_end_line: 15,
-        goto_file: None,
-        attributes: HarnessAttributes::new(HarnessKind::Proof),
-        contract: None,
-        has_loop_contracts: false,
-        is_automatically_generated: false,
-        is_bounded: false,
-        is_ctor_based: false,
-    };
-
-    let verification_result = VerificationResult {
-        status: VerificationStatus::Failure,
-        failed_properties: FailedProperties::Other,
-        results: Err(ExitStatus::Other(42)),
-        runtime: Duration::from_millis(120),
-        generated_concrete_test: false,
-        ignored_quantifiers: 0,
-        coverage_results: None,
-        cbmc_stats: None,
-    };
+    let mut harness = harness("bar::harness_fail", "src/main.rs");
+    harness.original_start_line = 5;
+    harness.original_end_line = 15;
+    let verification_result = failure_result(Err(ExitStatus::Other(42)));
 
     let harness_result = HarnessResult { harness: &harness, result: verification_result };
 

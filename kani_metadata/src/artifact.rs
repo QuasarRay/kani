@@ -52,23 +52,11 @@ impl ArtifactType {
 /// ```
 pub fn convert_type(path: &Path, from: ArtifactType, to: ArtifactType) -> PathBuf {
     let mut result = path.to_path_buf();
-    // Strip current extensions and replace by the new one.
-    match from {
-        // Artifact types that has only one extension.
-        ArtifactType::Goto => {
-            result.set_extension(to);
-        }
-        // Artifact types that has two extensions.
-        ArtifactType::Metadata
-        | ArtifactType::SymTab
-        | ArtifactType::SymTabGoto
-        | ArtifactType::TypeMap
-        | ArtifactType::VTableRestriction
-        | ArtifactType::PrettyNameMap => {
-            result.set_extension("");
-            result.set_extension(to);
-        }
+    // All artifact types except Goto have two extensions.
+    if from != ArtifactType::Goto {
+        result.set_extension("");
     }
+    result.set_extension(to);
     result
 }
 

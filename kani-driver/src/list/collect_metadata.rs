@@ -27,11 +27,7 @@ pub fn process_metadata(metadata: Vec<KaniMetadata>) -> BTreeSet<ListMetadata> {
                   map: &mut BTreeMap<FileName, BTreeSet<HarnessName>>,
                   count: &mut usize| {
         *count += 1;
-        if let Some(harnesses) = map.get_mut(&harness_meta.original_file) {
-            harnesses.insert(harness_meta.pretty_name);
-        } else {
-            map.insert(harness_meta.original_file, BTreeSet::from([harness_meta.pretty_name]));
-        };
+        map.entry(harness_meta.original_file).or_default().insert(harness_meta.pretty_name);
     };
 
     for kani_meta in metadata {

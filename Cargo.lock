@@ -1174,6 +1174,7 @@ version = "0.68.0"
 dependencies = [
  "charon",
  "clap",
+ "comprende",
  "cprover_bindings",
  "indexmap",
  "itertools 0.15.0",

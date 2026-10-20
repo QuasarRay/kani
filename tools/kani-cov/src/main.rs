@@ -22,10 +22,8 @@ fn main() -> Result<()> {
     validate_args(&args)?;
 
     match args.command.unwrap() {
-        Subcommand::Merge(merge_args) => merge::merge_main(&merge_args)?,
-        Subcommand::Summary(summary_args) => summary::summary_main(&summary_args)?,
-        Subcommand::Report(report_args) => report::report_main(&report_args)?,
-    };
-
-    Ok(())
+        Subcommand::Merge(merge_args) => merge::merge_main(&merge_args),
+        Subcommand::Summary(summary_args) => summary::summary_main(&summary_args),
+        Subcommand::Report(report_args) => report::report_main(&report_args),
+    }
 }

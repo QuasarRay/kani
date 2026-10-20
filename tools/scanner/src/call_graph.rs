@@ -9,12 +9,11 @@
 
 use crate::analysis::{FnCallVisitor, FnUnsafeOperations, OverallStats};
 use rustc_middle::ty::TyCtxt;
-use rustc_public::mir::{MirVisitor, Safety};
+use rustc_public::mir::MirVisitor;
 use rustc_public::ty::{FnDef, RigidTy, Ty, TyKind};
 use rustc_public::{CrateDef, CrateDefType};
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 impl OverallStats {
@@ -44,7 +43,6 @@ impl OverallStats {
                 for callee in &visitor.fns {
                     call_graph.rev_edges.entry(*callee).or_default().push(node.def)
                 }
-                call_graph.edges.insert(node.def, visitor.fns);
             }
         }
 
@@ -76,15 +74,14 @@ impl OverallStats {
     }
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 struct Node {
     def: FnDef,
-    is_unsafe: bool,
     has_unsafe: bool,
 }
 
 impl Node {
-    fn try_new(ty: Ty, tcx: &TyCtxt) -> Option<Node> {
+    fn try_new(ty: Ty, tcx: &TyCtxt) -> Option<Self> {
         let kind = ty.kind();
         let TyKind::RigidTy(RigidTy::FnDef(def, _)) = kind else {
             return None;
@@ -95,21 +92,12 @@ impl Node {
         } else {
             true
         };
-        let fn_sig = kind.fn_sig().unwrap();
-        let is_unsafe = fn_sig.skip_binder().safety == Safety::Unsafe;
-        Some(Node { def, is_unsafe, has_unsafe })
-    }
-}
-
-impl Hash for Node {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.def.hash(state)
+        Some(Self { def, has_unsafe })
     }
 }
 
 #[derive(Default, Debug)]
 struct CallGraph {
     nodes: HashMap<FnDef, Node>,
-    edges: HashMap<FnDef, Vec<FnDef>>,
     rev_edges: HashMap<FnDef, Vec<FnDef>>,
 }

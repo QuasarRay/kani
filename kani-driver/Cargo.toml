@@ -16,6 +16,9 @@ kani_metadata = { path = "../kani_metadata" }
 cargo_metadata = "0.23"
 anyhow = "1"
 console = "0.16"
+cgp = "=0.8.0-alpha"
+derive-deftly = "=1.14.0"
+comprende = { git = "https://github.com/QuasarRay/comprende", rev = "645141dd7bedd91c302b08daf93317ea6f87396e" }
 once_cell = "1.19.0"
 to_markdown_table = "0.1.0"
 serde = { version = "1", features = ["derive"] }

@@ -4,11 +4,16 @@
 //! This module defines coverage-oriented data structures shared among
 //! subcommands and other utilities like the Rust tree-sitter.
 
+use anyhow::Result;
 use console::style;
 use serde_derive::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
-use std::{collections::HashMap, fmt::Display};
-use std::{fmt, fs};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display},
+    fs::{self, File},
+    io::BufReader,
+    path::{Path, PathBuf},
+};
 use tree_sitter::{Node, Parser};
 
 pub type Function = String;
@@ -17,6 +22,17 @@ pub type LineNumber = usize;
 pub type ColumnNumber = usize;
 
 pub type LineResults = Vec<(LineNumber, Option<(usize, MarkerInfo)>)>;
+
+pub fn load_coverage_inputs(
+    mapfile: &Path,
+    profile: &Path,
+) -> Result<(CombinedCoverageResults, Vec<PathBuf>)> {
+    let mapfile = BufReader::new(File::open(mapfile)?);
+    let profile = BufReader::new(File::open(profile)?);
+    let results = serde_json::from_reader(profile).expect("could not load coverage results");
+    let source_files = serde_json::from_reader(mapfile).expect("could not parse coverage metadata");
+    Ok((results, source_files))
+}
 
 /// The possible outcomes for a Kani check.
 ///
@@ -141,7 +157,7 @@ pub struct CoverageMetric {
 
 impl CoverageMetric {
     pub fn new(covered: usize, total: usize) -> Self {
-        CoverageMetric { covered, total }
+        Self { covered, total }
     }
 }
 
@@ -162,16 +178,12 @@ pub fn function_info_from_file(filepath: &PathBuf) -> Vec<FunctionInfo> {
     let tree = parser.parse(&source_code, None).expect("Failed to parse file");
 
     let source_code_bytes = source_code.as_bytes();
-    let mut function_info: Vec<FunctionInfo> = Vec::new();
     let mut cursor = tree.walk();
-
-    for node in tree.root_node().children(&mut cursor) {
-        if node.kind() == "function_item" {
-            function_info.push(function_info_from_node(node, source_code_bytes));
-        }
-    }
-
-    function_info
+    tree.root_node()
+        .children(&mut cursor)
+        .filter(|node| node.kind() == "function_item")
+        .map(|node| function_info_from_node(node, source_code_bytes))
+        .collect()
 }
 
 /// Helper function to extract function information using a tree-sitter
@@ -196,10 +208,9 @@ pub fn function_coverage_results(
     // them with the ones we have in the aggregated results (i.e., the filenames
     // in the "kanimap" files).
     let filename = file.to_str()?;
-    let right_filename = results.data.keys().find(|p| filename.ends_with(*p)).unwrap();
+    let (_, file_results) = results.data.iter().find(|(p, _)| filename.ends_with(*p)).unwrap();
     // TODO: The filenames in kaniraw files should be absolute, just like in metadata.
     // Otherwise the key for `results` just fails... <https://github.com/model-checking/kani/issues/3542>
-    let file_results = results.data.get(right_filename).unwrap();
     let function = &info.name;
     let fun_results = file_results.iter().find(|(f, _)| *f == *function);
     fun_results.cloned()

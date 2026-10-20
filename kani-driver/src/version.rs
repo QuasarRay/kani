@@ -83,14 +83,12 @@ fn print_cbmc_version_info() {
 
 /// The mismatch warning, or `None` on a match. Split out for unit tests.
 fn cbmc_version_mismatch_warning(found: &str, pinned: &str) -> Option<String> {
-    if found == pinned {
-        None
-    } else {
-        Some(format!(
+    (found != pinned).then(|| {
+        format!(
             "found CBMC {found} on PATH, but Kani pins CBMC {pinned} (see `kani-dependencies`). \
              Verification results may not reflect the pinned toolchain."
-        ))
-    }
+        )
+    })
 }
 
 /// Print Kani release version as `Kani Rust Verifier <version>[ (<git-revision>)] (<invocation>)`

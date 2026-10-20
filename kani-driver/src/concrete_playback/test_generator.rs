@@ -9,6 +9,7 @@ use crate::call_cbmc::VerificationResult;
 use crate::cbmc_output_parser::Property;
 use crate::session::KaniSession;
 use anyhow::{Context, Result};
+use comprende::c;
 use concrete_vals_extractor::{ConcreteItem, PrimitiveConcreteVal, extract_harness_values};
 use kani_metadata::{HarnessKind, HarnessMetadata};
 use std::collections::hash_map::DefaultHasher;
@@ -27,76 +28,59 @@ impl KaniSession {
         harness: &HarnessMetadata,
         verification_result: &mut VerificationResult,
     ) -> Result<()> {
-        let playback_mode = match self.args.concrete_playback {
-            Some(playback_mode) => playback_mode,
-            None => return Ok(()),
-        };
+        let Some(playback_mode) = self.args.concrete_playback else { return Ok(()) };
+        let Ok(result_items) = &verification_result.results else { return Ok(()) };
+        let harness_values = extract_harness_values(result_items);
+        if harness_values.is_empty() {
+            println!(
+                "WARNING: Kani could not produce a concrete playback for `{}` because there \
+                were no failing panic checks or satisfiable cover statements.",
+                harness.pretty_name
+            );
+            return Ok(());
+        }
 
-        if let Ok(result_items) = &verification_result.results {
-            let harness_values = extract_harness_values(result_items);
-
-            if harness_values.is_empty() {
-                println!(
-                    "WARNING: Kani could not produce a concrete playback for `{}` because there \
-                    were no failing panic checks or satisfiable cover statements.",
-                    harness.pretty_name
-                )
-            } else {
-                let mut unit_tests: Vec<UnitTest> = harness_values
-                    .iter()
-                    .map(|(prop, concrete_items)| {
-                        let pretty_name = harness.get_harness_name_unqualified();
-                        format_unit_test(pretty_name, concrete_items, gen_test_doc(harness, prop))
-                    })
-                    .collect();
-                unit_tests.dedup_by(|a, b| a.name == b.name);
-                match playback_mode {
-                    ConcretePlaybackMode::Print => {
-                        for generated_unit_test in unit_tests.iter() {
-                            println!(
-                                "Concrete playback unit test for `{}`:\n```\n{}\n```",
-                                harness.pretty_name,
-                                generated_unit_test.code.join("\n")
-                            );
-                        }
-
-                        if !unit_tests.is_empty() {
-                            println!(
-                                "INFO: To automatically add the concrete playback unit test(s) to the \
-                                 src code, run Kani with `--concrete-playback=inplace`.",
-                            );
-                        }
-                    }
-                    ConcretePlaybackMode::InPlace => {
-                        if !self.args.common_args.quiet && !unit_tests.is_empty() {
-                            println!(
-                                "INFO: Now modifying the source code to include the concrete playback unit test:{}.",
-                                unit_tests
-                                    .iter()
-                                    .map(|generated_unit_test| format!(
-                                        "\n  - {}",
-                                        generated_unit_test.name
-                                    ))
-                                    .collect::<Vec<String>>()
-                                    .join("")
-                            );
-                        }
-                        self.modify_src_code(
-                            &harness.original_file,
-                            harness.original_end_line,
-                            unit_tests,
-                        )
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "Failed to modify source code for the file `{}`",
-                                harness.original_file
-                            )
-                        });
-                    }
+        let pretty_name = harness.get_harness_name_unqualified();
+        let mut unit_tests = harness_values
+            .iter()
+            .map(|(prop, items)| format_unit_test(pretty_name, items, gen_test_doc(harness, prop)))
+            .collect::<Vec<_>>();
+        unit_tests.dedup_by(|a, b| a.name == b.name);
+        match playback_mode {
+            ConcretePlaybackMode::Print => {
+                for test in &unit_tests {
+                    println!(
+                        "Concrete playback unit test for `{}`:\n```\n{}\n```",
+                        harness.pretty_name,
+                        test.code.join("\n")
+                    );
                 }
-                verification_result.generated_concrete_test = true;
+                println!(
+                    "INFO: To automatically add the concrete playback unit test(s) to the \
+                     src code, run Kani with `--concrete-playback=inplace`.",
+                );
+            }
+            ConcretePlaybackMode::InPlace => {
+                if !self.args.common_args.quiet {
+                    println!(
+                        "INFO: Now modifying the source code to include the concrete playback unit test:{}.",
+                        unit_tests
+                            .iter()
+                            .map(|test| format!("\n  - {}", test.name))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    );
+                }
+                self.modify_src_code(&harness.original_file, harness.original_end_line, unit_tests)
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Failed to modify source code for the file `{}`",
+                            harness.original_file
+                        )
+                    });
             }
         }
+        verification_result.generated_concrete_test = true;
         Ok(())
     }
 
@@ -118,7 +102,7 @@ impl KaniSession {
             let unit_test_start_line = proof_harness_end_line + 1;
             let unit_test_end_line = unit_test_start_line + concrete_playback_num_lines - 1;
             let src_path = Path::new(src_path);
-            let (path, file_name) = extract_parent_dir_and_src_file(src_path)?;
+            let (path, file_name) = extract_parent_dir_and_src_file(src_path);
             let file_line_ranges = vec![FileLineRange {
                 file: file_name,
                 line_range: Some((unit_test_start_line, unit_test_end_line)),
@@ -198,31 +182,7 @@ impl KaniSession {
         current_dir_opt: Option<&str>,
     ) -> Result<()> {
         let mut cmd = Command::new("rustfmt");
-        let mut args: Vec<OsString> = Vec::new();
-
-        // Deal with file line ranges.
-        let mut line_range_dicts: Vec<String> = Vec::new();
-        for file_line_range in file_line_ranges {
-            if let Some((start_line, end_line)) = file_line_range.line_range {
-                let src_file = &file_line_range.file;
-                let line_range_dict =
-                    format!("{{\"file\":\"{src_file}\",\"range\":[{start_line},{end_line}]}}");
-                line_range_dicts.push(line_range_dict);
-            }
-        }
-        if !line_range_dicts.is_empty() {
-            // `--file-lines` arg is currently unstable.
-            args.push("--unstable-features".into());
-            args.push("--file-lines".into());
-            let line_range_dicts_combined = format!("[{}]", line_range_dicts.join(","));
-            args.push(line_range_dicts_combined.into());
-        }
-
-        for file_line_range in file_line_ranges {
-            args.push((&file_line_range.file).into());
-        }
-
-        cmd.args(args);
+        cmd.args(rustfmt_args(file_line_ranges));
 
         if let Some(current_dir) = current_dir_opt {
             cmd.current_dir(current_dir);
@@ -305,12 +265,13 @@ fn format_unit_test(
     ]
     .into_iter();
 
-    let full_func: Vec<_> = func_before_concrete_vals
-        .chain(formatted_concrete_items)
-        .chain(func_after_concrete_vals)
-        .collect();
-
-    UnitTest { code: full_func, name: func_name }
+    UnitTest {
+        code: func_before_concrete_vals
+            .chain(formatted_concrete_items)
+            .chain(func_after_concrete_vals)
+            .collect(),
+        name: func_name,
+    }
 }
 
 /// Format concrete items as strings--these make up the body of the concrete test.
@@ -349,17 +310,34 @@ fn format_concrete_vals(
 }
 
 /// Suppose `src_path` was `/path/to/file.txt`. This function extracts this into `/path/to` and `file.txt`.
-fn extract_parent_dir_and_src_file(src_path: &Path) -> Result<(String, String)> {
-    let parent_dir_as_path = src_path.parent().unwrap();
-    let parent_dir = parent_dir_as_path.to_string_lossy().to_string();
-    let src_file_name_as_osstr = src_path.file_name();
-    let src_file = src_file_name_as_osstr.unwrap().to_string_lossy().to_string();
-    Ok((parent_dir, src_file))
+fn extract_parent_dir_and_src_file(src_path: &Path) -> (String, String) {
+    (
+        src_path.parent().unwrap().to_string_lossy().into_owned(),
+        src_path.file_name().unwrap().to_string_lossy().into_owned(),
+    )
 }
 
 struct FileLineRange {
     file: String,
     line_range: Option<(usize, usize)>,
+}
+
+fn rustfmt_args(file_line_ranges: &[FileLineRange]) -> Vec<OsString> {
+    let line_ranges = c![
+        format!("{{\"file\":\"{}\",\"range\":[{start},{end}]}}", range.file)
+        for range in file_line_ranges
+        for (start, end) in range.line_range
+    ];
+    let mut args = vec![];
+    if !line_ranges.is_empty() {
+        args.extend([
+            "--unstable-features".into(),
+            "--file-lines".into(),
+            format!("[{}]", line_ranges.join(",")).into(),
+        ]);
+    }
+    args.extend(file_line_ranges.iter().map(|range| (&range.file).into()));
+    args
 }
 
 struct UnitTest {
@@ -534,30 +512,51 @@ mod tests {
         TraceValue,
     };
 
-    /// util function for unit tests taht generates the rustfmt args used for formatting specific lines inside specific files.
-    /// note - adding this within the test mod because it gives a lint warning without it.
-    fn rustfmt_args(file_line_ranges: &[FileLineRange]) -> Vec<OsString> {
-        let mut args: Vec<OsString> = Vec::new();
-        let mut line_range_dicts: Vec<String> = Vec::new();
-        for file_line_range in file_line_ranges {
-            if let Some((start_line, end_line)) = file_line_range.line_range {
-                let src_file = &file_line_range.file;
-                let line_range_dict =
-                    format!("{{\"file\":\"{src_file}\",\"range\":[{start_line},{end_line}]}}");
-                line_range_dicts.push(line_range_dict);
-            }
+    fn trace_value(binary: &str, data: &str, width: u64) -> TraceValue {
+        TraceValue {
+            binary: Some(binary.to_string()),
+            data: Some(TraceData::NonBool(data.to_string())),
+            width: Some(width),
+            elements: None,
         }
-        if !line_range_dicts.is_empty() {
-            // `--file-lines` arg is currently unstable.
-            args.push("--unstable-features".into());
-            args.push("--file-lines".into());
-            let line_range_dicts_combined = format!("[{}]", line_range_dicts.join(","));
-            args.push(line_range_dicts_combined.into());
+    }
+
+    fn trace_item(function: &str, value: TraceValue) -> TraceItem {
+        TraceItem {
+            step_type: "assignment".to_string(),
+            lhs: Some("goto_symex$return_value".to_string()),
+            source_location: Some(SourceLocation {
+                column: None,
+                file: None,
+                function: Some(function.to_string()),
+                line: None,
+            }),
+            value: Some(value),
         }
-        for file_line_range in file_line_ranges {
-            args.push((&file_line_range.file).into());
+    }
+
+    fn failing_property(trace: Vec<TraceItem>) -> Property {
+        Property {
+            description: String::new(),
+            property_id: PropertyId {
+                fn_name: Some(String::new()),
+                class: "assertion".to_string(),
+                id: 1,
+            },
+            status: CheckStatus::Failure,
+            reach: None,
+            source_location: SourceLocation {
+                column: None,
+                file: None,
+                function: None,
+                line: None,
+            },
+            trace: Some(trace),
         }
-        args
+    }
+
+    fn primitive(bytes: &[u8], value: &str) -> PrimitiveConcreteVal {
+        PrimitiveConcreteVal { byte_arr: bytes.to_vec(), interp_val: value.to_string() }
     }
 
     #[test]
@@ -609,10 +608,7 @@ mod tests {
     fn format_unit_test_full_func() {
         let doc_str = "/// Test documentation";
         let harness_name = "test_proof_harness";
-        let concrete_vals = [ConcreteItem::Primitive(PrimitiveConcreteVal {
-            byte_arr: vec![0, 0],
-            interp_val: "0".to_string(),
-        })];
+        let concrete_vals = [ConcreteItem::Primitive(primitive(&[0, 0], "0"))];
         let unit_test = format_unit_test(harness_name, &concrete_vals, doc_str.to_string());
         let full_func = unit_test.code;
         let split_unit_test_name = split_unit_test_name(&unit_test.name);
@@ -651,32 +647,17 @@ mod tests {
         let harness_name_1 = "test_proof_harness1";
         let harness_name_2 = "test_proof_harness2";
         let concrete_items_1 = [
-            ConcreteItem::Primitive(PrimitiveConcreteVal {
-                byte_arr: vec![0, 0],
-                interp_val: "0".to_string(),
-            }),
-            ConcreteItem::Array(vec![PrimitiveConcreteVal {
-                byte_arr: vec![0, 0],
-                interp_val: "0".to_string(),
-            }]),
+            ConcreteItem::Primitive(primitive(&[0, 0], "0")),
+            ConcreteItem::Array(vec![primitive(&[0, 0], "0")]),
         ];
-        let concrete_items_2 = [ConcreteItem::Primitive(PrimitiveConcreteVal {
-            byte_arr: vec![1, 0],
-            interp_val: "0".to_string(),
-        })];
+        let concrete_items_2 = [ConcreteItem::Primitive(primitive(&[1, 0], "0"))];
         let concrete_items_3 = [
-            ConcreteItem::Array(vec![PrimitiveConcreteVal {
-                byte_arr: vec![0, 0],
-                interp_val: "0".to_string(),
-            }]),
-            ConcreteItem::Primitive(PrimitiveConcreteVal {
-                byte_arr: vec![0, 0],
-                interp_val: "1".to_string(),
-            }),
+            ConcreteItem::Array(vec![primitive(&[0, 0], "0")]),
+            ConcreteItem::Primitive(primitive(&[0, 0], "1")),
             ConcreteItem::Array(vec![
-                PrimitiveConcreteVal { byte_arr: vec![0, 0], interp_val: "0".to_string() },
-                PrimitiveConcreteVal { byte_arr: vec![1, 0], interp_val: "0".to_string() },
-                PrimitiveConcreteVal { byte_arr: vec![1, 0, 255], interp_val: "0".to_string() },
+                primitive(&[0, 0], "0"),
+                primitive(&[1, 0], "0"),
+                primitive(&[1, 0, 255], "0"),
             ]),
         ];
 
@@ -723,7 +704,7 @@ mod tests {
     fn check_extract_parent_dir_and_src_file() {
         let src_path = "/path/to/file.txt";
         let src_path = Path::new(src_path);
-        let (path, file_name) = extract_parent_dir_and_src_file(src_path).unwrap();
+        let (path, file_name) = extract_parent_dir_and_src_file(src_path);
         assert_eq!(path, "/path/to");
         assert_eq!(file_name, "file.txt");
     }
@@ -731,38 +712,10 @@ mod tests {
     /// Test util functions which extract the counter example values from a property.
     #[test]
     fn check_concrete_vals_extractor_primitive() {
-        let processed_items = [Property {
-            description: "".to_string(),
-            property_id: PropertyId {
-                fn_name: Some("".to_string()),
-                class: "assertion".to_string(),
-                id: 1,
-            },
-            status: CheckStatus::Failure,
-            reach: None,
-            source_location: SourceLocation {
-                column: None,
-                file: None,
-                function: None,
-                line: None,
-            },
-            trace: Some(vec![TraceItem {
-                step_type: "assignment".to_string(),
-                lhs: Some("goto_symex$$return_value".to_string()),
-                source_location: Some(SourceLocation {
-                    column: None,
-                    file: None,
-                    function: Some("kani::any_raw_internal::<u8>".to_string()),
-                    line: None,
-                }),
-                value: Some(TraceValue {
-                    binary: Some("0000001100000001".to_string()),
-                    data: Some(TraceData::NonBool("385".to_string())),
-                    width: Some(16),
-                    elements: None,
-                }),
-            }]),
-        }];
+        let processed_items = [failing_property(vec![trace_item(
+            "kani::any_raw_internal::<u8>",
+            trace_value("0000001100000001", "385", 16),
+        )])];
         let (_, concrete_items) = extract_harness_values(&processed_items).pop().unwrap();
         let concrete_item = &concrete_items[0];
 
@@ -776,156 +729,42 @@ mod tests {
     /// Test util functions which extract the counter example values from a property for arrays.
     #[test]
     fn check_concrete_vals_extractor_array() {
-        let processed_items = [Property {
-            description: "".to_string(),
-            property_id: PropertyId {
-                fn_name: Some("".to_string()),
-                class: "assertion".to_string(),
-                id: 1,
-            },
-            status: CheckStatus::Failure,
-            reach: None,
-            source_location: SourceLocation {
-                column: None,
-                file: None,
-                function: None,
-                line: None,
-            },
-            trace: Some(vec![
-                TraceItem {
-                    step_type: "assignment".to_string(),
-                    lhs: Some("goto_symex$$return_value".to_string()),
-                    source_location: Some(SourceLocation {
-                        column: None,
-                        file: None,
-                        function: Some("kani::any_raw_array::<u16; 4>".to_string()),
-                        line: None,
-                    }),
-                    value: Some(TraceValue {
-                        binary: None,
-                        data: None,
-                        width: None,
-                        elements: Some(vec![
-                            TraceArrayValue {
-                                value: TraceValue {
-                                    binary: Some("11111111111111111111111111111111".to_string()),
-                                    data: Some(TraceData::NonBool("4294967295".to_string())),
-                                    width: Some(32),
-                                    elements: None,
-                                },
-                            },
-                            TraceArrayValue {
-                                value: TraceValue {
-                                    binary: Some("10000000000000000000000000000000".to_string()),
-                                    data: Some(TraceData::NonBool("2147483648".to_string())),
-                                    width: Some(32),
-                                    elements: None,
-                                },
-                            },
-                            TraceArrayValue {
-                                value: TraceValue {
-                                    binary: Some("11111111111111111111111111111111".to_string()),
-                                    data: Some(TraceData::NonBool("4294967295".to_string())),
-                                    width: Some(32),
-                                    elements: None,
-                                },
-                            },
-                            TraceArrayValue {
-                                value: TraceValue {
-                                    binary: Some("00000000000000000000000000000111".to_string()),
-                                    data: Some(TraceData::NonBool("7".to_string())),
-                                    width: Some(32),
-                                    elements: None,
-                                },
-                            },
-                        ]),
-                    }),
-                },
-                // Since the array is of size 4, there are also TraceItems for each element of the array, which extract_harness_value should ignore.
-                TraceItem {
-                    step_type: "assignment".to_string(),
-                    lhs: Some("goto_symex$$return_value".to_string()),
-                    source_location: Some(SourceLocation {
-                        column: None,
-                        file: None,
-                        function: Some("kani::any_raw_array::<u16; 4>".to_string()),
-                        line: None,
-                    }),
-                    value: Some(TraceValue {
-                        binary: Some("11111111111111111111111111111111".to_string()),
-                        data: Some(TraceData::NonBool("4294967295".to_string())),
-                        width: Some(32),
-                        elements: None,
-                    }),
-                },
-                TraceItem {
-                    step_type: "assignment".to_string(),
-                    lhs: Some("goto_symex$$return_value".to_string()),
-                    source_location: Some(SourceLocation {
-                        column: None,
-                        file: None,
-                        function: Some("kani::any_raw_array::<u16; 4>".to_string()),
-                        line: None,
-                    }),
-                    value: Some(TraceValue {
-                        binary: Some("10000000000000000000000000000000".to_string()),
-                        data: Some(TraceData::NonBool("2147483648".to_string())),
-                        width: Some(32),
-                        elements: None,
-                    }),
-                },
-                TraceItem {
-                    step_type: "assignment".to_string(),
-                    lhs: Some("goto_symex$$return_value".to_string()),
-                    source_location: Some(SourceLocation {
-                        column: None,
-                        file: None,
-                        function: Some("kani::any_raw_array::<u16; 4>".to_string()),
-                        line: None,
-                    }),
-                    value: Some(TraceValue {
-                        binary: Some("11111111111111111111111111111111".to_string()),
-                        data: Some(TraceData::NonBool("4294967295".to_string())),
-                        width: Some(32),
-                        elements: None,
-                    }),
-                },
-                TraceItem {
-                    step_type: "assignment".to_string(),
-                    lhs: Some("goto_symex$$return_value".to_string()),
-                    source_location: Some(SourceLocation {
-                        column: None,
-                        file: None,
-                        function: Some("kani::any_raw_array::<u16; 4>".to_string()),
-                        line: None,
-                    }),
-                    value: Some(TraceValue {
-                        binary: Some("00000000000000000000000000000111".to_string()),
-                        data: Some(TraceData::NonBool("7".to_string())),
-                        width: Some(32),
-                        elements: None,
-                    }),
-                },
-            ]),
-        }];
+        const FUNCTION: &str = "kani::any_raw_array::<u16; 4>";
+        let values = [
+            ("11111111111111111111111111111111", "4294967295"),
+            ("10000000000000000000000000000000", "2147483648"),
+            ("11111111111111111111111111111111", "4294967295"),
+            ("00000000000000000000000000000111", "7"),
+        ];
+        let elements = c![
+            TraceArrayValue { value: trace_value(binary, data, 32) }
+            for (binary, data) in values.iter().copied()
+        ];
+        let array = TraceValue { binary: None, data: None, width: None, elements: Some(elements) };
+        let mut trace = vec![trace_item(FUNCTION, array)];
+        // Small arrays also receive one primitive trace item per element; extraction must ignore
+        // these duplicates after consuming the aggregate `elements` value above.
+        trace.extend(c![
+            trace_item(FUNCTION, trace_value(binary, data, 32))
+            for (binary, data) in values.iter().copied()
+        ]);
+        let processed_items = [failing_property(trace)];
         let (_, concrete_items) = extract_harness_values(&processed_items).pop().unwrap();
         let concrete_item = &concrete_items[0];
 
         assert!(matches!(concrete_item, ConcreteItem::Array(_)));
         if let ConcreteItem::Array(concrete_vals) = concrete_item {
-            assert_eq!(concrete_vals.len(), 4);
-            let first_val = &concrete_vals[0];
-            assert_eq!(first_val.byte_arr, vec![255, 255, 255, 255]);
-            assert_eq!(first_val.interp_val, "4294967295");
-            let second_val = &concrete_vals[1];
-            assert_eq!(second_val.byte_arr, vec![0, 0, 0, 128]);
-            assert_eq!(second_val.interp_val, "2147483648");
-            let third_val = &concrete_vals[2];
-            assert_eq!(third_val.byte_arr, vec![255, 255, 255, 255]);
-            assert_eq!(third_val.interp_val, "4294967295");
-            let fourth_val = &concrete_vals[3];
-            assert_eq!(fourth_val.byte_arr, vec![7, 0, 0, 0]);
-            assert_eq!(fourth_val.interp_val, "7");
+            let expected = [
+                (&[255, 255, 255, 255][..], "4294967295"),
+                (&[0, 0, 0, 128][..], "2147483648"),
+                (&[255, 255, 255, 255][..], "4294967295"),
+                (&[7, 0, 0, 0][..], "7"),
+            ];
+            assert_eq!(concrete_vals.len(), expected.len());
+            for (actual, (bytes, value)) in concrete_vals.iter().zip(expected) {
+                assert_eq!(actual.byte_arr, bytes);
+                assert_eq!(actual.interp_val, value);
+            }
         }
     }
 }

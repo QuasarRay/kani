@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use anyhow::Result;
+use comprende::c;
 use std::path::Path;
 
 use kani_metadata::{
@@ -48,31 +49,20 @@ fn link_function_pointer_restrictions(
     data_per_crate: Vec<VtableCtxResults>,
     output_filename: &Path,
 ) -> Result<()> {
-    // Combine all method possibilities into one global mapping
-    let mut combined_possible_methods: HashMap<TraitDefinedMethod, Vec<InternedString>> =
-        HashMap::new();
-    for crate_data in &data_per_crate {
-        for entry in &crate_data.possible_methods {
-            combined_possible_methods
-                .insert(entry.trait_method.clone(), entry.possibilities.clone());
-        }
-    }
+    // Combine all method possibilities into one global mapping.
+    let combined_possible_methods: HashMap<TraitDefinedMethod, Vec<InternedString>> = c! {
+        entry.trait_method.clone(): entry.possibilities.clone()
+        for crate_data in &data_per_crate
+        for entry in &crate_data.possible_methods
+    };
 
-    // Emit a restriction for every call site
-    let mut output = HashMap::new();
-    for crate_data in data_per_crate {
-        for call_site in crate_data.call_sites {
-            // CBMC Now supports referencing callsites by label:
-            // https://github.com/diffblue/cbmc/pull/6508
-            let cbmc_call_site_name = format!("{}.{}", call_site.function_name, call_site.label);
-            let trait_def = call_site.trait_method;
-
-            // Look up all possibilities, defaulting to the empty set
-            let possibilities =
-                combined_possible_methods.get(&trait_def).unwrap_or(&vec![]).clone();
-            output.insert(cbmc_call_site_name, possibilities);
-        }
-    }
+    // Emit a restriction for every call site.
+    let output = c! {
+        format!("{}.{}", call_site.function_name, call_site.label):
+            combined_possible_methods.get(&call_site.trait_method).cloned().unwrap_or_default()
+        for crate_data in data_per_crate
+        for call_site in crate_data.call_sites
+    };
 
     let f = File::create(output_filename)?;
     let f = BufWriter::new(f);

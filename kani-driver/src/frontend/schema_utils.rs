@@ -10,7 +10,6 @@ use crate::frontend::JsonHandler;
 use crate::harness_runner::HarnessResult;
 use crate::project::Project;
 use crate::session::KaniSession;
-use anyhow::Result;
 use kani_metadata::{CbmcSolver, HarnessMetadata};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -27,16 +26,12 @@ pub fn create_metadata_json() -> Value {
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string());
 
-    let kani_version = env!("CARGO_PKG_VERSION");
-    let target = env!("TARGET");
-    let build_mode = if cfg!(debug_assertions) { "debug" } else { "release" };
-
     json!({
     "version": "1.0",
     "timestamp": timestamp,
-    "kani_version": kani_version,
-    "target": target,
-    "build_mode": build_mode,
+    "kani_version": env!("CARGO_PKG_VERSION"),
+    "target": env!("TARGET"),
+    "build_mode": if cfg!(debug_assertions) { "debug" } else { "release" },
     })
 }
 
@@ -289,9 +284,6 @@ pub fn create_verification_summary_json(
     let failed = results.len() - successful;
     let total_duration_ms: u64 = results.iter().map(|r| r.result.runtime.as_millis() as u64).sum();
 
-    let verification_results: Vec<_> =
-        results.iter().map(|r| create_verification_result_json(r)).collect();
-
     json!({
         "summary": {
             "total_harnesses": selected,
@@ -301,7 +293,7 @@ pub fn create_verification_summary_json(
             "failed": failed,
             "duration_ms": total_duration_ms
         },
-        "results": verification_results
+        "results": results.iter().map(create_verification_result_json).collect::<Vec<_>>()
     })
 }
 
@@ -313,9 +305,10 @@ pub fn add_runner_results_to_json(
     selected: usize,
     status_label: &str,
 ) {
-    // Use frontend utility to create structured verification summary
-    let summary = create_verification_summary_json(results, selected, status_label);
-    handler.add_item("verification_results", summary);
+    handler.add_item(
+        "verification_results",
+        create_verification_summary_json(results, selected, status_label),
+    );
 }
 
 /// Process harness results and enrich JSON handler with additional metadata.
@@ -325,7 +318,7 @@ pub fn process_harness_results(
     handler: &mut JsonHandler,
     harnesses: &[&HarnessMetadata],
     results: &[HarnessResult],
-) -> Result<()> {
+) {
     // The main verification results are handled by the harness runner
     for h in harnesses {
         let harness_result = results.iter().find(|r| r.harness.pretty_name == h.pretty_name);
@@ -382,8 +375,6 @@ pub fn process_harness_results(
             );
         }
     }
-
-    Ok(())
 }
 
 /// The solver CBMC will actually run with.
@@ -451,16 +442,14 @@ fn effective_solver(session: &KaniSession, harness_solver: &Option<CbmcSolver>) 
 /// for building the command line and the wrong one for describing it: the run does have a value, so
 /// take it from `--cbmc-args` instead of exporting null for an explicitly configured run.
 fn effective_object_bits(session: &KaniSession) -> Option<u32> {
-    if let Some(bits) = session.args.cbmc_object_bits() {
-        return Some(bits);
-    }
-    let mut cbmc_args = session.args.cbmc_args.iter();
-    while let Some(arg) = cbmc_args.next() {
-        if arg == "--object-bits" {
-            return cbmc_args.next().and_then(|bits| bits.to_str()?.parse().ok());
-        }
-    }
-    None
+    session.args.cbmc_object_bits().or_else(|| {
+        session
+            .args
+            .cbmc_args
+            .windows(2)
+            .find(|args| args[0] == "--object-bits")
+            .and_then(|args| args[1].to_str()?.parse().ok())
+    })
 }
 
 pub fn process_cbmc_results(
@@ -468,7 +457,7 @@ pub fn process_cbmc_results(
     harnesses: &[&HarnessMetadata],
     results: &[HarnessResult],
     session: &KaniSession,
-) -> Result<()> {
+) {
     let cbmc_info_opt = session.get_cbmc_info().ok();
     for h in harnesses {
         let harness_result = results.iter().find(|r| r.harness.pretty_name == h.pretty_name);
@@ -505,7 +494,6 @@ pub fn process_cbmc_results(
             }))
         }));
     }
-    Ok(())
 }
 
 /// Simple container to standardize tool outputs captured during verification

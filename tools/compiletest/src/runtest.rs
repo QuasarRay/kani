@@ -73,8 +73,7 @@ impl TestCx<'_> {
     /// Code executed
     fn run(&self) {
         match self.config.mode {
-            Kani => self.run_kani_test(),
-            KaniFixme => self.run_kani_test(),
+            Kani | KaniFixme => self.run_kani_test(),
             CargoCoverage => self.run_cargo_coverage_test(),
             CargoKani => self.run_cargo_kani_test(false),
             CargoKaniTest => self.run_cargo_kani_test(true),
@@ -201,67 +200,64 @@ impl TestCx<'_> {
         proc_res.fatal(None, || ());
     }
 
+    fn require_success(&self, proc_res: &ProcRes, message: &str) {
+        if !proc_res.status.success() {
+            self.fatal_proc_rec(message, proc_res);
+        }
+    }
+
+    fn run_compiler(&self, codegen: bool) -> ProcRes {
+        let mut cmd = Command::new("kani-compiler");
+        cmd.arg("--goto-c").args(&self.props.compile_flags);
+        if codegen {
+            cmd.arg("--out-dir").arg(self.output_base_dir());
+        } else {
+            cmd.args(["-Z", "no-codegen"]);
+        }
+        cmd.arg(&self.testpaths.file);
+        self.compose_and_run(cmd)
+    }
+
+    fn required_test_path(&self, relative: impl AsRef<Path>, label: &str) -> PathBuf {
+        let path = self.testpaths.file.join(relative);
+        if !path.exists() {
+            fatal_error(&format!("test failed: couldn't find {label} in {}", path.display()));
+        }
+        path
+    }
+
+    fn expect_status(&self, proc_res: &ProcRes, stage: &str, failure_step: Option<KaniFailStep>) {
+        let expected_failure = self.props.kani_panic_step == failure_step;
+        if proc_res.status.success() == expected_failure {
+            let expected = if expected_failure { "failure" } else { "success" };
+            let got = if proc_res.status.success() { "success" } else { "failure" };
+            self.fatal_proc_rec(
+                &format!("test failed: expected {stage} {expected}, got {got}"),
+                proc_res,
+            );
+        }
+    }
+
     /// Runs `kani-compiler` on the test file specified by `self.testpaths.file`. An
     /// error message is printed to stdout if the check result is not expected.
     fn check(&self) {
-        let mut rustc = Command::new("kani-compiler");
-        rustc
-            .args(["--goto-c"])
-            .args(self.props.compile_flags.clone())
-            .args(["-Z", "no-codegen"])
-            .arg(&self.testpaths.file);
-        let proc_res = self.compose_and_run(rustc);
-        if self.props.kani_panic_step == Some(KaniFailStep::Check) {
-            if proc_res.status.success() {
-                self.fatal_proc_rec("test failed: expected check failure, got success", &proc_res);
-            }
-        } else if !proc_res.status.success() {
-            self.fatal_proc_rec("test failed: expected check success, got failure", &proc_res);
-        }
+        let proc_res = self.run_compiler(false);
+        self.expect_status(&proc_res, "check", Some(KaniFailStep::Check));
     }
 
     /// Runs `kani-compiler` on the test file specified by `self.testpaths.file`. An
     /// error message is printed to stdout if the codegen result is not
     /// expected.
     fn codegen(&self) {
-        let mut rustc = Command::new("kani-compiler");
-        rustc
-            .args(["--goto-c"])
-            .args(self.props.compile_flags.clone())
-            .args(["--out-dir"])
-            .arg(self.output_base_dir())
-            .arg(&self.testpaths.file);
-        let proc_res = self.compose_and_run(rustc);
-        if self.props.kani_panic_step == Some(KaniFailStep::Codegen) {
-            if proc_res.status.success() {
-                self.fatal_proc_rec(
-                    "test failed: expected codegen failure, got success",
-                    &proc_res,
-                );
-            }
-        } else if !proc_res.status.success() {
-            self.fatal_proc_rec("test failed: expected codegen success, got failure", &proc_res);
-        }
+        let proc_res = self.run_compiler(true);
+        self.expect_status(&proc_res, "codegen", Some(KaniFailStep::Codegen));
     }
 
     /// Runs Kani on the test file specified by `self.testpaths.file`. An error
     /// message is printed to stdout if the verification result is not expected.
     fn verify(&self) {
         let proc_res = self.run_kani();
-        // Print an error if the verification result is not expected.
-        if self.props.kani_panic_step == Some(KaniFailStep::Verify) {
-            if proc_res.status.success() {
-                self.fatal_proc_rec(
-                    "test failed: expected verification failure, got success",
-                    &proc_res,
-                );
-            }
-        } else if !proc_res.status.success() {
-            self.fatal_proc_rec(
-                "test failed: expected verification success, got failure",
-                &proc_res,
-            );
-        }
+        self.expect_status(&proc_res, "verification", Some(KaniFailStep::Verify));
     }
 
     /// Checks, codegens, and verifies the test file specified by
@@ -269,15 +265,9 @@ impl TestCx<'_> {
     /// is not expected.
     fn run_kani_test(&self) {
         match self.props.kani_panic_step {
-            Some(KaniFailStep::Check) => {
-                self.check();
-            }
-            Some(KaniFailStep::Codegen) => {
-                self.codegen();
-            }
-            Some(KaniFailStep::Verify) | None => {
-                self.verify();
-            }
+            Some(KaniFailStep::Check) => self.check(),
+            Some(KaniFailStep::Codegen) => self.codegen(),
+            Some(KaniFailStep::Verify) | None => self.verify(),
         }
     }
 
@@ -321,99 +311,64 @@ impl TestCx<'_> {
     /// An error message is printed to stdout if verification output does not
     /// contain the expected output in `self.testpaths.file`.
     fn run_cargo_kani_test(&self, test: bool) {
-        // We create our own command for the same reasons listed in `run_kani_test` method.
-        let mut cargo = Command::new("cargo");
-        // We run `cargo` on the directory where we found the `*.expected` file
-        let parent_dir = self.testpaths.file.parent().unwrap();
-        // The name of the function to test is the same as the stem of `*.expected` file
-        let function_name = self.testpaths.file.file_stem().unwrap().to_str().unwrap();
-        // Start each run from a clean target directory (see `clean_cargo_target_dir`).
-        let target_dir = self.clean_cargo_target_dir();
-        cargo.arg("kani").arg("--target-dir").arg(&target_dir).current_dir(parent_dir);
-        if test {
-            cargo.arg("--tests");
-        }
-        if "expected" != self.testpaths.file.file_name().unwrap() {
-            cargo.args(["--harness", function_name]);
-        }
-        cargo.args(&self.config.extra_args);
-
-        let proc_res = self.compose_and_run(cargo);
-        self.verify_output(&proc_res, &self.testpaths.file);
-
-        // TODO: We should probably be checking the exit status somehow
-        // See https://github.com/model-checking/kani/issues/1895
+        self.run_cargo_kani_expected(&[], test.then_some("--tests").into_iter());
     }
 
     /// Common method used to run Kani on a single file test.
     fn run_kani(&self) -> ProcRes {
-        // Other modes call self.compile_test(...). However, we cannot call it here for two reasons:
-        // 1. It calls rustc instead of Kani
-        // 2. It may pass some options that do not make sense for Kani
-        // So we create our own command to execute Kani and pass it to self.compose_and_run(...) directly.
-        let mut kani = Command::new("kani");
-        // We cannot pass rustc flags directly to Kani. Instead, we add them
-        // to the current environment through the `RUSTFLAGS` environment
-        // variable. Kani recognizes the variable and adds those flags to its
-        // internal call to rustc.
-        if !self.props.compile_flags.is_empty() {
-            kani.env("RUSTFLAGS", self.props.compile_flags.join(" "));
-        }
-
-        // Pass the test path along with Kani and CBMC flags parsed from comments at the top of the test file.
-        kani.arg(&self.testpaths.file).args(&self.props.kani_flags);
-
-        if !self.props.cbmc_flags.is_empty() {
-            kani.arg("-Zunstable-options").arg("--cbmc-args").args(&self.props.cbmc_flags);
-        }
-
-        self.compose_and_run(kani)
+        self.run_kani_command(false)
     }
 
     /// Run Kani with coverage enabled on a single source file
     fn run_kani_with_coverage(&self) -> ProcRes {
+        self.run_kani_command(true)
+    }
+
+    fn run_kani_command(&self, coverage: bool) -> ProcRes {
         let mut kani = Command::new("kani");
         if !self.props.compile_flags.is_empty() {
             kani.env("RUSTFLAGS", self.props.compile_flags.join(" "));
         }
         kani.arg(&self.testpaths.file).args(&self.props.kani_flags);
-        kani.arg("--coverage").args(["-Z", "source-coverage"]);
-
+        if coverage {
+            kani.arg("--coverage").args(["-Z", "source-coverage"]);
+        }
         if !self.props.cbmc_flags.is_empty() {
+            if !coverage {
+                kani.arg("-Zunstable-options");
+            }
             kani.arg("--cbmc-args").args(&self.props.cbmc_flags);
         }
-
         self.compose_and_run(kani)
     }
 
     /// Run Kani with coverage enabled on a cargo package
     fn run_cargo_coverage_test(&self) {
-        // We create our own command for the same reasons listed in `run_kani_test` method.
+        self.run_cargo_kani_expected(&["--coverage", "-Zsource-coverage"], std::iter::empty());
+    }
+
+    fn run_cargo_kani_expected<'a>(
+        &self,
+        before_target: &[&str],
+        after_target: impl IntoIterator<Item = &'a str>,
+    ) {
+        let parent = self.testpaths.file.parent().unwrap();
+        let function = self.testpaths.file.file_stem().unwrap().to_str().unwrap();
+        let target = self.clean_cargo_target_dir();
         let mut cargo = Command::new("cargo");
-        // We run `cargo` on the directory where we found the `*.expected` file
-        let parent_dir = self.testpaths.file.parent().unwrap();
-        // The name of the function to test is the same as the stem of `*.expected` file
-        let function_name = self.testpaths.file.file_stem().unwrap().to_str().unwrap();
-        // Start each run from a clean target directory (see `clean_cargo_target_dir`).
-        let target_dir = self.clean_cargo_target_dir();
         cargo
             .arg("kani")
-            .arg("--coverage")
-            .arg("-Zsource-coverage")
+            .args(before_target)
             .arg("--target-dir")
-            .arg(&target_dir)
-            .current_dir(parent_dir);
-
-        if "expected" != self.testpaths.file.file_name().unwrap() {
-            cargo.args(["--harness", function_name]);
+            .arg(target)
+            .args(after_target)
+            .current_dir(parent);
+        if self.testpaths.file.file_name().unwrap() != "expected" {
+            cargo.args(["--harness", function]);
         }
         cargo.args(&self.config.extra_args);
-
-        let proc_res = self.compose_and_run(cargo);
-        self.verify_output(&proc_res, &self.testpaths.file);
-
-        // TODO: We should probably be checking the exit status somehow
-        // See https://github.com/model-checking/kani/issues/1895
+        let result = self.compose_and_run(cargo);
+        self.verify_output(&result, &self.testpaths.file);
     }
 
     /// Runs an executable file and:
@@ -423,36 +378,11 @@ impl TestCx<'_> {
         // Open the `config.yml` file and extract its values
         let path_yml = self.testpaths.file.join("config.yml");
         let config_file = std::fs::File::open(path_yml).expect("couldn't open `config.yml`");
-        let exec_config_res = serde_yaml::from_reader(config_file);
-        if let Err(error) = &exec_config_res {
-            let err_msg = format!("couldn't parse `config.yml` file: {error}");
-            fatal_error(&err_msg);
-        }
-        let exec_config: ExecConfig = exec_config_res.unwrap();
-
-        // Check if the `script` file exists
-        let script_rel_path = PathBuf::from(exec_config.script);
-        let script_path = self.testpaths.file.join(script_rel_path);
-        if !script_path.exists() {
-            let err_msg = format!("test failed: couldn't find script in {}", script_path.display());
-            fatal_error(&err_msg);
-        }
-
-        // Check if the `expected` file exists, and load its contents into `expected_output`
-        let expected_path = if let Some(expected_path) = exec_config.expected {
-            let expected_rel_path = PathBuf::from(expected_path);
-            let expected_path = self.testpaths.file.join(expected_rel_path);
-            if !expected_path.exists() {
-                let err_msg = format!(
-                    "test failed: couldn't find expected file in {}",
-                    expected_path.display()
-                );
-                fatal_error(&err_msg);
-            }
-            Some(expected_path)
-        } else {
-            None
-        };
+        let exec_config: ExecConfig = serde_yaml::from_reader(config_file)
+            .unwrap_or_else(|error| fatal_error(&format!("couldn't parse `config.yml` file: {error}")));
+        let script_path = self.required_test_path(exec_config.script, "script");
+        let expected_path =
+            exec_config.expected.map(|path| self.required_test_path(path, "expected file"));
 
         // Create the command `time script` and run it from the test directory
         let mut script_path_cmd = Command::new("time");
@@ -465,11 +395,10 @@ impl TestCx<'_> {
         }
 
         // Compare with exit code (0 if it wasn't provided)
-        let expected_code = exec_config.exit_code.or(Some(0));
-        if proc_res.status.code() != expected_code {
+        let expected_code = exec_config.exit_code.unwrap_or(0);
+        if proc_res.status.code() != Some(expected_code) {
             let err_msg = format!(
-                "test failed: expected code {}, got code {}",
-                expected_code.unwrap(),
+                "test failed: expected code {expected_code}, got code {}",
                 proc_res.status.code().unwrap()
             );
             self.fatal_proc_rec(&err_msg, &proc_res);
@@ -515,12 +444,7 @@ impl TestCx<'_> {
     /// arguments to test specific abstractions and modules.
     fn run_stub_test(&self) {
         let proc_res = self.run_kani();
-        if !proc_res.status.success() {
-            self.fatal_proc_rec(
-                "test failed: expected verification success, got failure",
-                &proc_res,
-            );
-        }
+        self.require_success(&proc_res, "test failed: expected verification success, got failure");
     }
 
     /// Print an error if the verification output does not contain the expected
@@ -618,20 +542,13 @@ impl TestCx<'_> {
         kanicov_merge.arg(kanicov);
         let merge_cmd = self.compose_and_run(kanicov_merge);
 
-        if !merge_cmd.status.success() {
-            self.fatal_proc_rec("test failed: could not run `kani-cov merge` command", &merge_cmd);
-        }
+        self.require_success(&merge_cmd, "test failed: could not run `kani-cov merge` command");
 
         let mut kanicov_report = Command::new("kani-cov");
         kanicov_report.arg("report").arg(kanimap).arg("--profile").arg(kanicov);
         let report_cmd = self.compose_and_run(kanicov_report);
 
-        if !report_cmd.status.success() {
-            self.fatal_proc_rec(
-                "test failed: could not run `kani-cov report` command",
-                &report_cmd,
-            );
-        }
+        self.require_success(&report_cmd, "test failed: could not run `kani-cov report` command");
         report_cmd
     }
 
@@ -640,15 +557,15 @@ impl TestCx<'_> {
     /// run. `kanicov` is the name we will use for the output of the `kani-cov
     /// merge` command.
     fn find_cov_files(&self, folder_path: &Path) -> (PathBuf, Vec<PathBuf>, PathBuf) {
-        let folder_name = folder_path.file_name().unwrap();
+        let folder_name = folder_path.file_name().unwrap().to_string_lossy();
 
-        let kanimap = folder_path.join(format!("{}_kanimap.json", folder_name.to_string_lossy()));
-        let kanicov = folder_path.join(format!("{}_kanicov.json", folder_name.to_string_lossy()));
+        let kanimap = folder_path.join(format!("{folder_name}_kanimap.json"));
+        let kanicov = folder_path.join(format!("{folder_name}_kanicov.json"));
 
         let kaniraw_glob = format!("{}/*_kaniraw.json", folder_path.display());
         let kaniraws: Vec<PathBuf> = glob::glob(&kaniraw_glob)
             .expect("Failed to read glob pattern")
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .collect();
 
         (kanimap, kaniraws, kanicov)
@@ -665,17 +582,17 @@ impl TestCx<'_> {
     /// Summary:
     /// ```
     fn extract_cov_results_path(&self, proc_res: &ProcRes) -> PathBuf {
-        let output_lines = proc_res.stdout.split('\n').collect::<Vec<&str>>();
-        let coverage_info = output_lines.iter().find(|l| l.contains("Coverage results saved to"));
-        if coverage_info.is_none() {
-            self.fatal_proc_rec("failed to find the path to the coverage results", proc_res);
-        }
-        let coverage_path = coverage_info
-            .unwrap()
+        proc_res
+            .stdout
+            .lines()
+            .find(|line| line.contains("Coverage results saved to"))
+            .unwrap_or_else(|| {
+                self.fatal_proc_rec("failed to find the path to the coverage results", proc_res)
+            })
             .split(' ')
             .next_back()
-            .expect("couldn't retrieve path to the coverage results");
-        PathBuf::from(coverage_path)
+            .expect("couldn't retrieve path to the coverage results")
+            .into()
     }
 }
 

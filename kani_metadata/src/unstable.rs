@@ -133,11 +133,8 @@ impl UnstableFeature {
     ///    }
     /// ```
     /// for the unstable list feature, which was stabilized in version 0.63 and removed permanently in v0.66.
-    #[allow(clippy::match_single_binding)]
     pub fn stabilization_version(&self) -> Option<String> {
-        match self {
-            _ => None,
-        }
+        None
     }
 }
 

@@ -24,6 +24,10 @@ use std::collections::{HashMap, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
+fn local_fns() -> impl Iterator<Item = CrateItem> {
+    rustc_public::all_local_items().into_iter().filter(|item| item.ty().kind().is_fn())
+}
+
 #[derive(Clone, Debug)]
 pub struct OverallStats {
     /// The key and value of each counter.
@@ -43,8 +47,8 @@ struct FnStats {
 }
 
 impl FnStats {
-    fn new(fn_item: CrateItem) -> FnStats {
-        FnStats {
+    fn new(fn_item: CrateItem) -> Self {
+        Self {
             name: item_name(&fn_item),
             is_unsafe: None,
             has_unsafe_ops: None,
@@ -62,14 +66,10 @@ impl Default for OverallStats {
 }
 
 impl OverallStats {
-    pub fn new() -> OverallStats {
-        let all_items = rustc_public::all_local_items();
-        let fn_stats: HashMap<_, _> = all_items
-            .into_iter()
-            .filter_map(|item| item.ty().kind().is_fn().then_some((item, FnStats::new(item))))
-            .collect();
+    pub fn new() -> Self {
+        let fn_stats = local_fns().map(|item| (item, FnStats::new(item))).collect::<HashMap<_, _>>();
         let counters = vec![("total_fns", fn_stats.len())];
-        OverallStats { counters, fn_stats }
+        Self { counters, fn_stats }
     }
 
     pub fn store_csv(&self, base_path: PathBuf, file_stem: &str) {
@@ -86,54 +86,37 @@ impl OverallStats {
 
     /// Iterate over all functions defined in this crate and log generic vs monomorphic.
     pub fn generic_fns(&mut self) {
-        let all_items = rustc_public::all_local_items();
-        let fn_items =
-            all_items.into_iter().filter(|item| item.ty().kind().is_fn()).collect::<Vec<_>>();
-        let (mono_fns, generics) = fn_items
-            .iter()
-            .partition::<Vec<&CrateItem>, _>(|fn_item| Instance::try_from(**fn_item).is_ok());
+        let (mono_fns, generics) =
+            local_fns().partition::<Vec<_>, _>(|item| Instance::try_from(*item).is_ok());
         self.counters
             .extend_from_slice(&[("generic_fns", generics.len()), ("mono_fns", mono_fns.len())]);
     }
 
     /// Iterate over all functions defined in this crate and log safe vs unsafe.
     pub fn safe_fns(&mut self, _base_filename: PathBuf) {
-        let all_items = rustc_public::all_local_items();
-        let (unsafe_fns, safe_fns) = all_items
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
-                let fn_sig = kind.fn_sig().unwrap();
-                let is_unsafe = fn_sig.skip_binder().safety == Safety::Unsafe;
+        let (unsafe_fns, safe_fns) = local_fns()
+            .map(|item| {
+                let is_unsafe =
+                    item.ty().kind().fn_sig().unwrap().skip_binder().safety == Safety::Unsafe;
                 self.fn_stats.get_mut(&item).unwrap().is_unsafe = Some(is_unsafe);
-                Some((item, is_unsafe))
+                (item, is_unsafe)
             })
-            .partition::<Vec<(CrateItem, bool)>, _>(|(_, is_unsafe)| *is_unsafe);
+            .partition::<Vec<_>, _>(|(_, is_unsafe)| *is_unsafe);
         self.counters
             .extend_from_slice(&[("safe_fns", safe_fns.len()), ("unsafe_fns", unsafe_fns.len())]);
     }
 
     /// Iterate over all functions defined in this crate and log the inputs.
     pub fn supported_inputs(&mut self, filename: PathBuf) {
-        let all_items = rustc_public::all_local_items();
-        let (supported, unsupported) = all_items
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
-                let fn_sig = kind.fn_sig().unwrap();
-                let props =
-                    FnInputProps::new(item_name(&item)).collect(fn_sig.skip_binder().inputs());
+        let (supported, unsupported) = local_fns()
+            .map(|item| {
+                let inputs = item.ty().kind().fn_sig().unwrap().skip_binder().inputs();
+                let props = FnInputProps::new(item_name(&item)).collect(inputs);
                 self.fn_stats.get_mut(&item).unwrap().has_unsupported_input =
                     Some(!props.is_supported());
-                Some(props)
+                props
             })
-            .partition::<Vec<_>, _>(|props| props.is_supported());
+            .partition::<Vec<_>, _>(FnInputProps::is_supported);
         self.counters.extend_from_slice(&[
             ("supported_inputs", supported.len()),
             ("unsupported_inputs", unsupported.len()),
@@ -143,21 +126,14 @@ impl OverallStats {
 
     /// Iterate over all functions defined in this crate and log any unsafe operation.
     pub fn unsafe_operations(&mut self, filename: PathBuf, tcx: &TyCtxt) {
-        let all_items = rustc_public::all_local_items();
-        let (has_unsafe, no_unsafe) = all_items
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
+        let (has_unsafe, no_unsafe) = local_fns()
+            .map(|item| {
                 let unsafe_ops =
                     FnUnsafeOperations::new(item_name(&item)).collect(&item.expect_body(), tcx);
-                let fn_sig = kind.fn_sig().unwrap();
-                let is_unsafe = fn_sig.skip_binder().safety == Safety::Unsafe;
-                self.fn_stats.get_mut(&item).unwrap().has_unsafe_ops =
-                    Some(unsafe_ops.has_unsafe());
-                Some((is_unsafe, unsafe_ops))
+                let is_unsafe =
+                    item.ty().kind().fn_sig().unwrap().skip_binder().safety == Safety::Unsafe;
+                self.fn_stats.get_mut(&item).unwrap().has_unsafe_ops = Some(unsafe_ops.has_unsafe());
+                (is_unsafe, unsafe_ops)
             })
             .partition::<Vec<_>, _>(|(_, props)| props.has_unsafe());
         self.counters.extend_from_slice(&[
@@ -172,52 +148,24 @@ impl OverallStats {
     ///
     /// A hidden loop is a call to a iterator function that has a loop inside.
     pub fn loops(&mut self, filename: PathBuf) {
-        let all_items = rustc_public::all_local_items();
-        let (has_loops, no_loops) = all_items
-            .clone()
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
-                Some(FnLoops::new(item_name(&item)).collect(&item.expect_body()))
-            })
-            .partition::<Vec<_>, _>(|props| props.has_loops());
-
-        let (has_iterators, no_iterators) = all_items
-            .clone()
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
-                Some(FnLoops::new(item_name(&item)).collect(&item.expect_body()))
-            })
-            .partition::<Vec<_>, _>(|props| props.has_iterators());
-
-        let (has_either, _) = all_items
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
-                let fn_props = FnLoops::new(item_name(&item)).collect(&item.expect_body());
+        let props = local_fns()
+            .map(|item| {
+                let props = FnLoops::new(item_name(&item)).collect(&item.expect_body());
                 self.fn_stats.get_mut(&item).unwrap().has_loop_or_iterator =
-                    Some(fn_props.has_iterators() || fn_props.has_loops());
-                Some(fn_props)
+                    Some(props.has_iterators() || props.has_loops());
+                props
             })
-            .partition::<Vec<_>, _>(|props| props.has_iterators() || props.has_loops());
-
+            .collect::<Vec<_>>();
         self.counters.extend_from_slice(&[
-            ("has_loops", has_loops.len()),
-            ("no_loops", no_loops.len()),
-            ("has_iterators", has_iterators.len()),
-            ("no_iterators", no_iterators.len()),
+            ("has_loops", props.iter().filter(|p| p.has_loops()).count()),
+            ("no_loops", props.iter().filter(|p| !p.has_loops()).count()),
+            ("has_iterators", props.iter().filter(|p| p.has_iterators()).count()),
+            ("no_iterators", props.iter().filter(|p| !p.has_iterators()).count()),
         ]);
-        dump_csv(filename, &has_either);
+        dump_csv(
+            filename,
+            &props.into_iter().filter(|p| p.has_iterators() || p.has_loops()).collect::<Vec<_>>(),
+        );
     }
 
     /// Create a callgraph for this crate and try to find recursive calls.
@@ -245,21 +193,14 @@ impl OverallStats {
 
     /// Iterate over all functions defined in this crate and log public vs private
     pub fn public_fns(&mut self, tcx: &TyCtxt) {
-        let all_items = rustc_public::all_local_items();
-        let (public_fns, private_fns) = all_items
-            .into_iter()
-            .filter_map(|item| {
-                let kind = item.ty().kind();
-                if !kind.is_fn() {
-                    return None;
-                };
-                let int_def_id = rustc_internal::internal(*tcx, item.def_id());
-                let is_public = tcx.visibility(int_def_id).is_public()
-                    || tcx.visibility(int_def_id).is_visible_locally();
+        let (public_fns, private_fns) = local_fns()
+            .map(|item| {
+                let visibility = tcx.visibility(rustc_internal::internal(*tcx, item.def_id()));
+                let is_public = visibility.is_public() || visibility.is_visible_locally();
                 self.fn_stats.get_mut(&item).unwrap().is_public = Some(is_public);
-                Some((item, is_public))
+                (item, is_public)
             })
-            .partition::<Vec<(CrateItem, bool)>, _>(|(_, is_public)| *is_public);
+            .partition::<Vec<_>, _>(|(_, is_public)| *is_public);
         self.counters.extend_from_slice(&[
             ("public_fns", public_fns.len()),
             ("private_fns", private_fns.len()),
@@ -367,11 +308,10 @@ impl Visitor for TypeVisitor<'_> {
     type Break = ();
 
     fn visit_ty(&mut self, ty: &Ty) -> ControlFlow<Self::Break> {
-        if self.visited.contains(ty) {
+        if !self.visited.insert(*ty) {
             self.metrics.recursive_types += 1;
             ControlFlow::Continue(())
         } else {
-            self.visited.insert(*ty);
             let kind = ty.kind();
             match kind {
                 TyKind::Alias(..) => {}
@@ -574,7 +514,7 @@ impl FnLoops {
     }
 
     pub fn has_iterators(&self) -> bool {
-        (self.iterators) > 0
+        self.iterators > 0
     }
 }
 

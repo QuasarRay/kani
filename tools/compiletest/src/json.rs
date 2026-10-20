@@ -34,6 +34,14 @@ struct FutureBreakageItem {
     diagnostic: Diagnostic,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CompilerOutput {
+    Diagnostic(Diagnostic),
+    FutureIncompat(FutureIncompatReport),
+    Artifact(ArtifactNotification),
+}
+
 #[derive(Deserialize, Clone)]
 #[allow(dead_code)]
 struct DiagnosticSpanMacroExpansion {
@@ -51,42 +59,28 @@ pub fn extract_rendered(output: &str) -> String {
     output
         .lines()
         .filter_map(|line| {
-            if line.starts_with('{') {
-                if let Ok(diagnostic) = serde_json::from_str::<Diagnostic>(line) {
-                    diagnostic.rendered
-                } else if let Ok(report) = serde_json::from_str::<FutureIncompatReport>(line) {
-                    if report.future_incompat_report.is_empty() {
-                        None
-                    } else {
-                        Some(format!(
-                            "Future incompatibility report: {}",
-                            report.future_incompat_report.into_iter().fold(
-                                String::new(),
-                                |mut output, item| {
-                                    use std::fmt::Write;
-                                    let _ = writeln!(output, "Future breakage diagnostic:");
-                                    let s = item
-                                        .diagnostic
-                                        .rendered
-                                        .unwrap_or_else(|| "Not rendered".to_string());
-                                    let _ = write!(output, "{s}");
-                                    output
-                                }
-                            )
-                        ))
-                    }
-                } else if serde_json::from_str::<ArtifactNotification>(line).is_ok() {
-                    // Ignore the notification.
-                    None
-                } else {
-                    print!(
-                        "failed to decode compiler output as json: line: {line}\noutput: {output}"
-                    );
+            if !line.starts_with('{') {
+                return Some(format!("{line}\n"));
+            }
+            match serde_json::from_str::<CompilerOutput>(line) {
+                Ok(CompilerOutput::Diagnostic(diagnostic)) => diagnostic.rendered,
+                Ok(CompilerOutput::FutureIncompat(report)) if report.future_incompat_report.is_empty() => None,
+                Ok(CompilerOutput::FutureIncompat(report)) => Some(format!(
+                    "Future incompatibility report: {}",
+                    report.future_incompat_report.into_iter().fold(String::new(), |mut output, item| {
+                        use std::fmt::Write;
+                        let _ = writeln!(output, "Future breakage diagnostic:");
+                        let rendered =
+                            item.diagnostic.rendered.unwrap_or_else(|| "Not rendered".to_string());
+                        let _ = write!(output, "{rendered}");
+                        output
+                    })
+                )),
+                Ok(CompilerOutput::Artifact(_)) => None,
+                Err(_) => {
+                    print!("failed to decode compiler output as json: line: {line}\noutput: {output}");
                     panic!()
                 }
-            } else {
-                // preserve non-JSON lines, such as ICEs
-                Some(format!("{line}\n"))
             }
         })
         .collect()

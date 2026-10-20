@@ -82,14 +82,10 @@ impl KaniSession {
         self.record_temporary_file(&linked_restrictions);
         collect_and_link_function_pointer_restrictions(restrictions, &linked_restrictions)?;
 
-        let args: Vec<OsString> = vec![
-            "--function-pointer-restrictions-file".into(),
-            linked_restrictions.into(),
-            goto_file.to_owned().into_os_string(), // input
-            goto_file.to_owned().into_os_string(), // output
-        ];
-
-        self.call_goto_instrument(args)
+        self.call_goto_instrument_in_place(
+            goto_file,
+            vec!["--function-pointer-restrictions-file".into(), linked_restrictions.into()],
+        )
     }
 
     /// Link the binary against the CBMC model for C library functions.
@@ -97,14 +93,10 @@ impl KaniSession {
     /// before we invoke `undefined_functions` below, otherwise these
     /// functions appear undefined.
     fn add_library(&self, file: &Path) -> Result<()> {
-        let args: Vec<OsString> = vec![
-            "--add-library".into(),
-            "--no-malloc-may-fail".into(),
-            file.to_owned().into_os_string(), // input
-            file.to_owned().into_os_string(), // output
-        ];
-
-        self.call_goto_instrument(args)
+        self.call_goto_instrument_in_place(
+            file,
+            vec!["--add-library".into(), "--no-malloc-may-fail".into()],
+        )
     }
 
     /// Instruct CBMC to "assert false" when invoking an undefined function.
@@ -114,48 +106,32 @@ impl KaniSession {
     /// functions as unused and remove them, and also as used and so would
     /// generate "assert false". So it's essential to do this afterwards.)
     fn undefined_functions(&self, file: &Path) -> Result<()> {
-        let args: Vec<OsString> = vec![
-            "--generate-function-body-options".into(),
-            "assert-false-assume-false".into(),
-            "--generate-function-body".into(),
-            ".*".into(),
-            "--drop-unused-functions".into(),
-            file.to_owned().into_os_string(), // input
-            file.to_owned().into_os_string(), // output
-        ];
-
-        self.call_goto_instrument(args)
+        self.call_goto_instrument_in_place(
+            file,
+            vec![
+                "--generate-function-body-options".into(),
+                "assert-false-assume-false".into(),
+                "--generate-function-body".into(),
+                ".*".into(),
+                "--drop-unused-functions".into(),
+            ],
+        )
     }
 
     /// Remove all functions unreachable from the current proof harness.
     fn just_drop_unused_functions(&self, file: &Path) -> Result<()> {
-        let args: Vec<OsString> = vec![
-            "--drop-unused-functions".into(),
-            file.to_owned().into_os_string(), // input
-            file.to_owned().into_os_string(), // output
-        ];
-
-        self.call_goto_instrument(args)
+        self.call_goto_instrument_in_place(file, vec!["--drop-unused-functions".into()])
     }
 
     fn rewrite_back_edges(&self, file: &Path) -> Result<()> {
-        let args: Vec<OsString> = vec![
-            "--ensure-one-backedge-per-target".into(),
-            file.to_owned().into_os_string(), // input
-            file.to_owned().into_os_string(), // output
-        ];
-
-        self.call_goto_instrument(args)
+        self.call_goto_instrument_in_place(
+            file,
+            vec!["--ensure-one-backedge-per-target".into()],
+        )
     }
 
     fn goto_sanity_check(&self, file: &Path) -> Result<()> {
-        let args: Vec<OsString> = vec![
-            "--validate-goto-model".into(),
-            file.to_owned().into_os_string(), // input
-            file.to_owned().into_os_string(), // output
-        ];
-
-        self.call_goto_instrument(args)
+        self.call_goto_instrument_in_place(file, vec!["--validate-goto-model".into()])
     }
 
     /// Generate a .c file from a goto binary (i.e. --gen-c)
@@ -206,10 +182,7 @@ impl KaniSession {
             }
         }
 
-        args.push(file.into());
-        args.push(file.into());
-
-        self.call_goto_instrument(&args)
+        self.call_goto_instrument_in_place(file, args)
     }
 
     /// Generate a .demangled.c file from the .c file using the `prettyName`s from the symbol table
@@ -238,6 +211,19 @@ impl KaniSession {
         }
         std::fs::write(demangled_file, c_code)?;
         Ok(())
+    }
+
+    /// Run goto-instrument with the same file as both input and output.
+    fn call_goto_instrument_in_place(
+        &self,
+        file: &Path,
+        mut args: Vec<OsString>,
+    ) -> Result<()> {
+        args.extend([
+            file.to_owned().into_os_string(),
+            file.to_owned().into_os_string(),
+        ]);
+        self.call_goto_instrument(args)
     }
 
     /// Non-public helper function to actually do the run of goto-instrument

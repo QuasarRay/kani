@@ -29,34 +29,25 @@ use crate::{
 pub fn merge_main(args: &MergeArgs) -> Result<()> {
     let raw_results = parse_raw_results(&args.files)?;
     let combined_results = combine_raw_results(&raw_results);
-    save_combined_results(&combined_results, &args.output)?;
-    Ok(())
+    save_combined_results(&combined_results, &args.output)
 }
 
-/// Validate arguments to the `merge` subcommand in addition to clap's
-/// validation.
-pub fn validate_merge_args(_args: &MergeArgs) -> Result<()> {
-    // No validation is done at the moment
-    Ok(())
-}
 
 /// Parse raw coverage results from a set of files (AKA "kaniraw" files)
-fn parse_raw_results(paths: &Vec<PathBuf>) -> Result<Vec<CoverageResults>> {
-    let mut raw_results = Vec::with_capacity(paths.len());
-    for path in paths {
-        let filename = path.to_string_lossy();
-        let file = File::open(path).unwrap_or_else(|_| panic!("could not open file {filename}"));
-        let reader = BufReader::new(file);
-
-        let result = serde_json::from_reader(reader)
-            .unwrap_or_else(|_| panic!("could not deserialize file {filename}"));
-        raw_results.push(result);
-    }
-    Ok(raw_results)
+fn parse_raw_results(paths: &[PathBuf]) -> Result<Vec<CoverageResults>> {
+    Ok(paths
+        .iter()
+        .map(|path| {
+            let name = path.to_string_lossy();
+            let file = File::open(path).unwrap_or_else(|_| panic!("could not open file {name}"));
+            serde_json::from_reader(BufReader::new(file))
+                .unwrap_or_else(|_| panic!("could not deserialize file {name}"))
+        })
+        .collect())
 }
 
 /// Combine raw coverage results into an aggregated form
-fn combine_raw_results(results: &Vec<CoverageResults>) -> CombinedCoverageResults {
+fn combine_raw_results(results: &[CoverageResults]) -> CombinedCoverageResults {
     let all_file_function_names = function_names_from_results(results);
 
     let mut new_data: HashMap<Filename, Vec<(Function, Vec<CovResult>)>> = HashMap::new();
@@ -65,15 +56,8 @@ fn combine_raw_results(results: &Vec<CoverageResults>) -> CombinedCoverageResult
         let mut this_fun_checks: Vec<&CoverageCheck> = Vec::new();
 
         for result in results {
-            if result.data.contains_key(&file_name) {
-                this_fun_checks.extend(
-                    result
-                        .data
-                        .get(&file_name)
-                        .unwrap()
-                        .iter()
-                        .filter(|check| check.function == fun_name),
-                )
+            if let Some(checks) = result.data.get(&file_name) {
+                this_fun_checks.extend(checks.iter().filter(|check| check.function == fun_name));
             }
         }
 
@@ -105,12 +89,7 @@ fn combine_raw_results(results: &Vec<CoverageResults>) -> CombinedCoverageResult
             new_results.push(new_result);
         }
 
-        let filename_copy = file_name.clone();
-        if new_data.contains_key(&file_name) {
-            new_data.get_mut(&filename_copy).unwrap().push((fun_name, new_results));
-        } else {
-            new_data.insert(file_name.clone(), vec![(fun_name, new_results)]);
-        }
+        new_data.entry(file_name).or_default().push((fun_name, new_results));
     }
     CombinedCoverageResults { data: new_data }
 }

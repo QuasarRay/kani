@@ -70,11 +70,7 @@ fn sort_results(results: &mut [(AggrResult, AggrResult)]) {
 
 /// Print results in a markdown format (for GitHub actions).
 fn print_markdown(results: &[(AggrResult, AggrResult)], suite_name: Option<String>) {
-    let suite_text = if let Some(suite_name) = suite_name {
-        format!(" (`{suite_name}` suite)")
-    } else {
-        "".to_string()
-    };
+    let suite_text = suite_name.map_or_else(String::new, |name| format!(" (`{name}` suite)"));
     println!("# Compiletime Results{suite_text}");
     let total_pre = results.iter().map(|i| i.0.iqr_stats.avg).sum();
     let total_post = results.iter().map(|i| i.1.iqr_stats.avg).sum();
@@ -181,10 +177,10 @@ fn verdict_on_change(pre: &AggrResult, post: &AggrResult) -> Verdict {
     }
 
     if pre.iqr_stats.avg > post.iqr_stats.avg {
-        return Verdict::Improved;
+        Verdict::Improved
+    } else {
+        Verdict::PotentialRegression { sample_std_dev: avg_std_dev }
     }
-
-    Verdict::PotentialRegression { sample_std_dev: avg_std_dev }
 }
 
 fn signed_percent_diff(pre: &Duration, post: &Duration) -> f64 {
@@ -211,7 +207,7 @@ enum Verdict {
     /// This crate compiled slower, but likely because of OS noise.
     ProbablyNoise(NoiseExplanation),
     /// This crate compiled slower, potentially indicating a true performance regression.
-    PotentialRegression { sample_std_dev: std::time::Duration },
+    PotentialRegression { sample_std_dev: Duration },
 }
 
 #[derive(Debug)]
@@ -220,7 +216,7 @@ enum NoiseExplanation {
     /// The increase in compile time is so small compared to the
     /// sample's standard deviation (< [FRAC_STD_DEV_THRESHOLD] * std_dev)
     /// that it is probably just sampling noise.
-    SmallComparedToStdDevOf(std::time::Duration),
+    SmallComparedToStdDevOf(Duration),
     /// The percentage increase in compile time is so small (< [FRAC_ABSOLUTE_THRESHOLD]),
     /// the difference is likely insignificant.
     SmallPercentageChange,
@@ -228,12 +224,12 @@ enum NoiseExplanation {
 
 impl Verdict {
     fn is_regression(&self) -> bool {
-        matches!(self, Verdict::PotentialRegression { sample_std_dev: _ })
+        matches!(self, Self::PotentialRegression { .. })
     }
 }
 
 fn try_read_files(c: &AnalyzerArgs) -> io::Result<(File, File)> {
-    io::Result::Ok((
+    Ok((
         File::open(c.path_pre.canonicalize()?)?,
         File::open(c.path_post.canonicalize()?)?,
     ))

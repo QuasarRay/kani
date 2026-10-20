@@ -104,14 +104,13 @@ impl ProgressIndicator {
 
         if let Some(ref pb) = self.progress_bar {
             pb.inc(1);
-            let completed = self.stats.get_completed();
-            let succeeded = self.stats.get_succeeded();
-            let failed = self.stats.get_failed();
-            let timed_out = self.stats.get_timed_out();
-
             pb.set_message(format!(
                 "Completed: {}/{} | Succeeded: {} | Failed: {} | Timed out: {}",
-                completed, self.stats.total, succeeded, failed, timed_out
+                self.stats.get_completed(),
+                self.stats.total,
+                self.stats.get_succeeded(),
+                self.stats.get_failed(),
+                self.stats.get_timed_out()
             ));
         }
     }
@@ -119,13 +118,11 @@ impl ProgressIndicator {
     /// Finish the progress indicator
     pub fn finish(&self) {
         if let Some(ref pb) = self.progress_bar {
-            let succeeded = self.stats.get_succeeded();
-            let failed = self.stats.get_failed();
-            let timed_out = self.stats.get_timed_out();
-
             pb.finish_with_message(format!(
                 "Verification complete | Succeeded: {} | Failed: {} | Timed out: {}",
-                succeeded, failed, timed_out
+                self.stats.get_succeeded(),
+                self.stats.get_failed(),
+                self.stats.get_timed_out()
             ));
         }
     }

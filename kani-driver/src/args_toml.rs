@@ -1,7 +1,7 @@
 // Copyright Kani Contributors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -14,12 +14,11 @@ use toml::value::Table;
 ///
 /// The arguments passed via command line have precedence over the ones from the Cargo.toml.
 pub fn join_args(input_args: Vec<OsString>) -> Result<Vec<OsString>> {
-    let toml_path = cargo_locate_project(&input_args);
-    if toml_path.is_err() {
+    let Ok(toml_path) = cargo_locate_project(&input_args) else {
         // We're not inside a Cargo project. Don't error... yet.
         return Ok(input_args);
-    }
-    let file = std::fs::read_to_string(toml_path?)?;
+    };
+    let file = std::fs::read_to_string(toml_path)?;
     let (kani_args, cbmc_args) = toml_to_args(&file)?;
     merge_args(input_args, kani_args, cbmc_args)
 }
@@ -103,24 +102,17 @@ fn toml_to_args(tomldata: &str) -> Result<(Vec<OsString>, Vec<OsString>)> {
     let tables = ["workspace.metadata.kani", "package.metadata.kani", "kani"];
     let mut args = Vec::new();
 
-    for table in tables {
-        if let Some(table) = get_table(&config, table) {
-            if let Some(entry) = table.get("flags")
-                && let Some(val) = entry.as_table()
-            {
-                map.extend(val.iter().map(|(x, y)| (x.to_owned(), y.to_owned())));
-            }
-
-            if let Some(entry) = table.get("unstable")
-                && let Some(val) = entry.as_table()
-            {
-                args.append(
-                    &mut val
-                        .iter()
-                        .filter_map(|(k, v)| unstable_entry(k, v).transpose())
-                        .collect::<Result<Vec<_>>>()?,
-                );
-            }
+    for table in tables.into_iter().filter_map(|name| get_table(&config, name)) {
+        if let Some(flags) = table.get("flags").and_then(Value::as_table) {
+            map.extend(flags.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if let Some(unstable) = table.get("unstable").and_then(Value::as_table) {
+            args.extend(
+                unstable
+                    .iter()
+                    .filter_map(|(k, v)| unstable_entry(k, v).transpose())
+                    .collect::<Result<Vec<_>>>()?,
+            );
         }
     }
 
@@ -140,7 +132,7 @@ fn toml_to_args(tomldata: &str) -> Result<(Vec<OsString>, Vec<OsString>)> {
 }
 
 /// Parse an entry from the unstable table and convert it into a `-Z <unstable_feature>` argument
-fn unstable_entry(name: &String, value: &Value) -> Result<Option<OsString>> {
+fn unstable_entry(name: &str, value: &Value) -> Result<Option<OsString>> {
     match value {
         Value::Boolean(b) if *b => Ok(Some(OsString::from(format!("-Z{name}")))),
         Value::Boolean(b) if !b => Ok(None),
@@ -163,18 +155,13 @@ fn insert_arg_from_toml(flag: &str, value: &Value, args: &mut Vec<OsString>) -> 
         }
         Value::Array(a) => {
             for arg in a {
-                if let Some(arg) = arg.as_str() {
-                    args.push(format!("--{flag}").into());
-                    args.push(arg.into());
-                } else {
+                let Some(arg) = arg.as_str() else {
                     bail!("flag {} contains non-string values", flag);
-                }
+                };
+                args.extend([format!("--{flag}").into(), arg.into()]);
             }
         }
-        Value::String(s) => {
-            args.push(format!("--{flag}").into());
-            args.push(s.into());
-        }
+        Value::String(s) => args.extend([format!("--{flag}").into(), s.into()]),
         _ => {
             bail!("Unknown key type {}", flag);
         }
@@ -184,38 +171,25 @@ fn insert_arg_from_toml(flag: &str, value: &Value, args: &mut Vec<OsString>) -> 
 
 /// Translates one toml entry (flag, value) into arguments and inserts it into `args`
 fn cbmc_arg_from_toml(value: &Value) -> Result<Vec<OsString>> {
-    let mut args = vec![];
     const CBMC_FLAG: &str = "--cbmc-args";
     match value {
-        Value::Boolean(_) => {
-            bail!("cannot pass boolean value to `{CBMC_FLAG}`")
-        }
-        Value::Array(a) => {
-            for arg in a {
-                if let Some(arg) = arg.as_str() {
-                    args.push(arg.into());
-                } else {
-                    bail!("flag {CBMC_FLAG} contains non-string values");
-                }
-            }
-        }
-        Value::String(s) => {
-            args.push(s.into());
-        }
-        _ => {
-            bail!("Unknown key type {CBMC_FLAG}");
-        }
+        Value::Boolean(_) => bail!("cannot pass boolean value to `{CBMC_FLAG}`"),
+        Value::Array(a) => a
+            .iter()
+            .map(|arg| {
+                arg.as_str()
+                    .map(OsString::from)
+                    .ok_or_else(|| anyhow!("flag {CBMC_FLAG} contains non-string values"))
+            })
+            .collect(),
+        Value::String(s) => Ok(vec![s.into()]),
+        _ => bail!("Unknown key type {CBMC_FLAG}"),
     }
-    Ok(args)
 }
 
 /// Take 'a.b.c' and turn it into 'start['a']['b']['c']' reliably, and interpret the result as a table
 fn get_table<'a>(start: &'a Table, table: &str) -> Option<&'a Table> {
-    let mut current = Some(start);
-    for key in table.split('.') {
-        current = current.and_then(|t| t.get(key).and_then(|v| v.as_table()));
-    }
-    current
+    table.split('.').try_fold(start, |current, key| current.get(key)?.as_table())
 }
 
 #[cfg(test)]

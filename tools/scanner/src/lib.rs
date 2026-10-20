@@ -50,7 +50,7 @@ pub fn run_all(rustc_args: Vec<String>, verbose: bool) -> ExitCode {
 pub fn run_analyses(rustc_args: Vec<String>, analyses: &[Analysis], verbose: bool) -> ExitCode {
     VERBOSE.store(verbose, Ordering::Relaxed);
     let result = run_with_tcx!(&rustc_args, |tcx| analyze_crate(tcx, analyses));
-    if result.is_ok() || matches!(result, Err(CompilerError::Skipped)) {
+    if matches!(result, Ok(_) | Err(CompilerError::Skipped)) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -100,12 +100,8 @@ fn analyze_crate(tcx: TyCtxt, analyses: &[Analysis]) -> ControlFlow<()> {
         let mut out_path = base_path.parent().map_or(PathBuf::default(), Path::to_path_buf);
         out_path.set_file_name(filename);
         match analysis {
-            Analysis::MonoFns => {
-                crate_stats.generic_fns();
-            }
-            Analysis::SafeFns => {
-                crate_stats.safe_fns(out_path);
-            }
+            Analysis::MonoFns => crate_stats.generic_fns(),
+            Analysis::SafeFns => crate_stats.safe_fns(out_path),
             Analysis::InputTys => crate_stats.supported_inputs(out_path),
             Analysis::UnsafeOps => crate_stats.unsafe_operations(out_path, &tcx),
             Analysis::FnLoops => crate_stats.loops(out_path),
@@ -115,5 +111,5 @@ fn analyze_crate(tcx: TyCtxt, analyses: &[Analysis]) -> ControlFlow<()> {
         }
     }
     crate_stats.store_csv(base_path, &file_stem);
-    ControlFlow::<()>::Continue(())
+    ControlFlow::Continue(())
 }

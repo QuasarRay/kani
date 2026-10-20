@@ -63,15 +63,15 @@ fn main() {
             res.push(new_res);
         } else {
             // we want want to recur and visit all directories that aren't explicitly ignored
-            to_visit.extend(std::fs::read_dir(next).unwrap().filter_map(|entry| {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.is_dir() && !args.ignore.iter().any(|ignored| path.ends_with(ignored)) {
-                        return Some(path);
-                    }
-                }
-                None
-            }));
+            to_visit.extend(
+                std::fs::read_dir(next)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.is_dir() && !args.ignore.iter().any(|ignored| path.ends_with(ignored))
+                    }),
+            );
         }
     }
 
@@ -82,31 +82,24 @@ fn main() {
 
 /// Profile a crate by running a certain number of untimed warmup runs and then
 /// a certain number of timed runs, returning aggregates of the timing results.
-fn profile_on_crate(absolute_path: &std::path::PathBuf) -> AggrResult {
-    let _warmup_results = (0..WARMUP_RUNS)
-        .map(|i| {
-            print!("\t[*] running warmup {}/{WARMUP_RUNS}", i + 1);
-            let _ = std::io::stdout().flush();
-            let res = run_command_in(absolute_path);
-            println!(" -- {res:?}");
-            res
-        })
-        .collect::<Vec<_>>();
-
-    let timed_results = (0..TIMED_RUNS)
-        .map(|i| {
-            print!("\t[*] running timed run {}/{TIMED_RUNS}", i + 1);
-            let _ = std::io::stdout().flush();
-            let res = run_command_in(absolute_path);
-            println!(" -- {res:?}");
-            res
-        })
-        .collect::<Vec<_>>();
-
+fn profile_on_crate(absolute_path: &PathBuf) -> AggrResult {
+    let _warmup_results = run_crate(absolute_path, "warmup", WARMUP_RUNS);
+    let timed_results = run_crate(absolute_path, "timed run", TIMED_RUNS);
     let aggr = aggregate_results(absolute_path, &timed_results);
     println!("\t[!] results for {absolute_path:?} are in! {aggr:?}");
-
     aggr
+}
+
+fn run_crate(path: &Path, label: &str, runs: usize) -> Vec<RunResult> {
+    (0..runs)
+        .map(|i| {
+            print!("\t[*] running {label} {}/{runs}", i + 1);
+            let _ = std::io::stdout().flush();
+            let res = run_command_in(path);
+            println!(" -- {res:?}");
+            res
+        })
+        .collect()
 }
 
 type RunResult = Duration;
@@ -159,14 +152,8 @@ fn aggregate_results(path: &Path, results: &[Duration]) -> AggrResult {
     // sort and calculate the subset of times in the interquartile range
     let mut sorted = results.to_vec();
     sorted.sort();
-    let iqr_bounds = (results.len() / 4, results.len() * 3 / 4);
-    let iqr_durations = sorted
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, v)| if i >= iqr_bounds.0 && i <= iqr_bounds.1 { Some(v) } else { None })
-        .collect::<Vec<Duration>>();
-
-    AggrResult::new(path.to_path_buf(), result_stats(&iqr_durations), result_stats(results))
+    let iqr_bounds = results.len() / 4..=results.len() * 3 / 4;
+    AggrResult::new(path.to_path_buf(), result_stats(&sorted[iqr_bounds]), result_stats(results))
 }
 
 /// Record the stats from a subset slice of timing runs.

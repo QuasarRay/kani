@@ -21,6 +21,7 @@ use crate::kani_middle::{
     fmt_impl_self_ty, implements_arbitrary,
 };
 use crate::kani_queries::QueryDb;
+use comprende::c;
 use kani_metadata::{
     ArtifactType, AssignsContract, AutoHarnessMetadata, AutoHarnessSkipReason, HarnessMetadata,
     KaniMetadata, find_proof_harnesses,
@@ -84,25 +85,12 @@ impl CodegenUnits {
         let args = queries.args();
         match args.reachability_analysis {
             ReachabilityType::Harnesses => {
-                let all_harnesses = determine_targets(
-                    get_all_manual_harnesses(tcx, base_filename),
-                    &args.harnesses,
-                    args.exact,
-                );
-                // Even if no_stubs is empty we still need to store rustc metadata.
-                let units = group_by_stubs(tcx, &all_harnesses);
-                validate_units(tcx, &units);
+                let (harness_info, units) = manual_units(tcx, base_filename, args);
                 debug!(?units, "CodegenUnits::new");
-                CodegenUnits { units, harness_info: all_harnesses, crate_info }
+                Self { units, harness_info, crate_info }
             }
             ReachabilityType::AllFns => {
-                let mut all_harnesses = determine_targets(
-                    get_all_manual_harnesses(tcx, base_filename),
-                    &args.harnesses,
-                    args.exact,
-                );
-                let mut units = group_by_stubs(tcx, &all_harnesses);
-                validate_units(tcx, &units);
+                let (mut all_harnesses, mut units) = manual_units(tcx, base_filename, args);
 
                 let kani_fns = queries.kani_functions();
                 let kani_harness_intrinsic =
@@ -160,24 +148,19 @@ impl CodegenUnits {
                 );
                 // We generate one contract harness per function under contract, so each harness is in its own unit,
                 // and these harnesses have no stubs.
-                units.extend(
-                    automatic_harnesses
-                        .keys()
-                        .map(|harness| CodegenUnit {
-                            harnesses: vec![*harness],
-                            stubs: HashMap::default(),
-                        })
-                        .collect::<Vec<_>>(),
-                );
-                all_harnesses.extend(automatic_harnesses.clone());
+                units.extend(automatic_harnesses.keys().map(|harness| CodegenUnit {
+                    harnesses: vec![*harness],
+                    stubs: HashMap::default(),
+                }));
+                all_harnesses.extend(automatic_harnesses);
 
                 // No need to validate the units again because validation only checks stubs, and we haven't added any stubs.
                 debug!(?units, "CodegenUnits::new");
-                CodegenUnits { units, harness_info: all_harnesses, crate_info }
+                Self { units, harness_info: all_harnesses, crate_info }
             }
             _ => {
                 // Leave other reachability type handling as is for now.
-                CodegenUnits { units: vec![], harness_info: HashMap::default(), crate_info }
+                Self { units: vec![], harness_info: HashMap::default(), crate_info }
             }
         }
     }
@@ -231,6 +214,18 @@ impl CodegenUnits {
     }
 }
 
+fn manual_units(
+    tcx: TyCtxt,
+    base_filename: &Path,
+    args: &Arguments,
+) -> (HashMap<Harness, HarnessMetadata>, Vec<CodegenUnit>) {
+    let harnesses =
+        determine_targets(get_all_manual_harnesses(tcx, base_filename), &args.harnesses, args.exact);
+    let units = group_by_stubs(tcx, &harnesses);
+    validate_units(tcx, &units);
+    (harnesses, units)
+}
+
 fn stub_def(tcx: TyCtxt, def_id: DefId) -> FnDef {
     let ty_internal = tcx.type_of(def_id).instantiate_identity().skip_normalization();
     let ty = rustc_internal::stable(ty_internal);
@@ -254,17 +249,20 @@ fn group_by_stubs(
             .iter()
             .map(|(k, v)| (tcx.def_path_hash(*k), tcx.def_path_hash(*v)))
             .collect::<BTreeMap<_, _>>();
-        let key = (contracts, stub_map);
-        if let Some(unit) = per_stubs.get_mut(&key) {
-            unit.harnesses.push(*harness);
-        } else {
-            let stubs = stub_ids
-                .iter()
-                .map(|(from, to)| (stub_def(tcx, *from), stub_def(tcx, *to)))
-                .collect::<HashMap<_, _>>();
-            let stubs = apply_transitivity(tcx, *harness, stubs);
-            per_stubs.insert(key, CodegenUnit { stubs, harnesses: vec![*harness] });
-        }
+        per_stubs
+            .entry((contracts, stub_map))
+            .or_insert_with(|| {
+                let stubs = stub_ids
+                    .iter()
+                    .map(|(from, to)| (stub_def(tcx, *from), stub_def(tcx, *to)))
+                    .collect();
+                CodegenUnit {
+                    stubs: apply_transitivity(tcx, *harness, stubs),
+                    harnesses: vec![],
+                }
+            })
+            .harnesses
+            .push(*harness);
     }
     per_stubs.into_values().collect()
 }
@@ -280,24 +278,25 @@ enum ContractUsage {
 /// Note that any error interpreting the result is emitted, but we delay aborting, so we emit as
 /// many errors as possible.
 fn extract_contracts(tcx: TyCtxt, harness: Harness) -> BTreeSet<ContractUsage> {
-    let def = harness.def;
-    let mut result = BTreeSet::new();
-    let attributes = KaniAttributes::for_def_id(tcx, def.def_id());
-    if let Some(target) = attributes.interpret_for_contract_attribute() {
-        result.insert(ContractUsage::Check(target.def_id().to_index()));
-    }
-    for stub in attributes.interpret_stub_verified_attribute() {
-        result.insert(ContractUsage::Stub(stub.def_id().to_index()));
-    }
-
-    result
+    let attributes = KaniAttributes::for_def_id(tcx, harness.def.def_id());
+    attributes
+        .interpret_for_contract_attribute()
+        .map(|target| ContractUsage::Check(target.def_id().to_index()))
+        .into_iter()
+        .chain(
+            attributes
+                .interpret_stub_verified_attribute()
+                .into_iter()
+                .map(|stub| ContractUsage::Stub(stub.def_id().to_index())),
+        )
+        .collect()
 }
 
 /// Extract the filename for the metadata file.
 fn metadata_output_path(tcx: TyCtxt) -> PathBuf {
-    let filepath = tcx.output_filenames(()).path(OutputType::Object);
-    let filename = filepath.as_path();
-    filename.with_extension(ArtifactType::Metadata).to_path_buf()
+    tcx.output_filenames(())
+        .path(OutputType::Object)
+        .with_extension(ArtifactType::Metadata)
 }
 
 /// Write the metadata to a file
@@ -359,14 +358,10 @@ fn get_all_manual_harnesses(
     tcx: TyCtxt,
     base_filename: &Path,
 ) -> HashMap<Harness, HarnessMetadata> {
-    let harnesses = filter_crate_items(tcx, |_, instance| is_proof_harness(tcx, instance));
-    harnesses
-        .into_iter()
-        .map(|harness| {
-            let metadata = gen_proof_metadata(tcx, harness, base_filename);
-            (harness, metadata)
-        })
-        .collect::<HashMap<_, _>>()
+    c! {
+        harness: gen_proof_metadata(tcx, harness, base_filename)
+        for harness in filter_crate_items(tcx, |_, instance| is_proof_harness(tcx, instance))
+    }
 }
 
 /// Filter which harnesses to codegen based on user filters. Shares use of `find_proof_harnesses` with the `determine_targets` function
@@ -428,13 +423,11 @@ fn get_all_automatic_harnesses(
 }
 
 fn make_regex_set(patterns: Vec<String>) -> Option<RegexSet> {
-    if patterns.is_empty() {
-        None
-    } else {
-        Some(RegexSet::new(patterns).unwrap_or_else(|e| {
+    (!patterns.is_empty()).then(|| {
+        RegexSet::new(patterns).unwrap_or_else(|e| {
             panic!("Invalid regexes should have been caught during argument validation: {e}")
-        }))
-    }
+        })
+    })
 }
 
 /// A function is filtered out if 1) none of the include patterns match it or 2) one of the exclude patterns matches it.
@@ -560,10 +553,7 @@ const CONST_PRECONDITION_SEARCH_LIMIT: usize = 1024;
 /// Whether any generic argument in `args` mentions a const generic parameter.
 fn args_mention_const_param(args: ty::GenericArgsRef<'_>) -> bool {
     use rustc_middle::ty::TypeVisitableExt;
-    args.iter().any(|arg| match arg.kind() {
-        ty::GenericArgKind::Const(ct) => ct.has_param(),
-        _ => false,
-    })
+    args.iter().any(|arg| matches!(arg.kind(), ty::GenericArgKind::Const(ct) if ct.has_param()))
 }
 
 /// Whether `body` contains an anonymous `const {}` block parameterized by a const generic
@@ -601,13 +591,9 @@ impl<'tcx> rustc_middle::mir::visit::Visitor<'tcx> for ConstParamCalleeCollector
     }
 
     fn visit_ty(&mut self, ty: ty::Ty<'tcx>, _: rustc_middle::mir::visit::TyContext) {
-        let nested = match *ty.kind() {
-            ty::Closure(def_id, args)
-            | ty::Coroutine(def_id, args)
-            | ty::CoroutineClosure(def_id, args) => Some((def_id, args)),
-            _ => None,
-        };
-        if let Some((def_id, args)) = nested
+        if let ty::Closure(def_id, args)
+        | ty::Coroutine(def_id, args)
+        | ty::CoroutineClosure(def_id, args) = *ty.kind()
             && args_mention_const_param(args)
         {
             self.callees.push(def_id);
@@ -823,6 +809,25 @@ fn fn_bound_candidates<'tcx>(
 /// type, and overwrite the placeholder in `choice`. Returns false if any deferred slot
 /// cannot be resolved for this choice (skip it).
 #[allow(clippy::too_many_arguments)]
+fn instantiate_generic_args(identity_args: &GenericArgs, choice: &[Ty]) -> GenericArgs {
+    let mut types = choice.iter();
+    GenericArgs(
+        identity_args
+            .0
+            .iter()
+            .map(|arg| match arg {
+                GenericArgKind::Type(_) => GenericArgKind::Type(*types.next().unwrap()),
+                GenericArgKind::Lifetime(_) => {
+                    GenericArgKind::Lifetime(Region { kind: RegionKind::ReErased })
+                }
+                GenericArgKind::Const(_) => GenericArgKind::Const(
+                    TyConst::try_from_target_usize(AUTOHARNESS_CONST_GENERIC_VALUE).unwrap(),
+                ),
+            })
+            .collect(),
+    )
+}
+
 fn resolve_deferred_fn_slots<'tcx>(
     tcx: TyCtxt<'tcx>,
     identity_args: &GenericArgs,
@@ -834,29 +839,8 @@ fn resolve_deferred_fn_slots<'tcx>(
     if deferred.is_empty() {
         return true;
     }
-    // Build a full internal substitution from the current choice (placeholders included:
-    // deferred slots hold unit, which is fine as long as no deferred signature references
-    // another Fn-bound parameter).
-    let mut next_type = 0usize;
-    let stable_args = GenericArgs(
-        identity_args
-            .0
-            .iter()
-            .map(|arg| match arg {
-                GenericArgKind::Type(_) => {
-                    let t = choice[next_type];
-                    next_type += 1;
-                    GenericArgKind::Type(t)
-                }
-                GenericArgKind::Lifetime(_) => {
-                    GenericArgKind::Lifetime(Region { kind: RegionKind::ReErased })
-                }
-                GenericArgKind::Const(_) => GenericArgKind::Const(
-                    TyConst::try_from_target_usize(AUTOHARNESS_CONST_GENERIC_VALUE).unwrap(),
-                ),
-            })
-            .collect(),
-    );
+    // Build a full internal substitution from the current choice.
+    let stable_args = instantiate_generic_args(identity_args, choice);
     let args_internal = rustc_internal::internal(tcx, &stable_args);
     for (&idx, spec) in deferred {
         use rustc_middle::ty::TypeVisitableExt;
@@ -1026,37 +1010,13 @@ fn choose_generic_instantiation(
         .collect();
     let n_impl_derived: usize = impl_derived.values().map(|v| v.len()).sum();
 
-    // Build the argument list substituting `choice[i]` for the i-th type parameter.
-    let build_args = |choice: &[Ty]| {
-        let mut next_type = 0;
-        GenericArgs(
-            identity_args
-                .0
-                .iter()
-                .map(|arg| match arg {
-                    GenericArgKind::Type(_) => {
-                        let ty = choice[next_type];
-                        next_type += 1;
-                        GenericArgKind::Type(ty)
-                    }
-                    GenericArgKind::Lifetime(_) => {
-                        GenericArgKind::Lifetime(Region { kind: RegionKind::ReErased })
-                    }
-                    GenericArgKind::Const(_) => GenericArgKind::Const(
-                        TyConst::try_from_target_usize(AUTOHARNESS_CONST_GENERIC_VALUE).unwrap(),
-                    ),
-                })
-                .collect(),
-        )
-    };
-
     let attempts = std::cell::Cell::new(0usize);
     // The first candidate rejected for making a SIMD intrinsic call invalid, so that the skip
     // reason names that instead of the trait bounds, which such a candidate does satisfy.
     let simd_rejection: std::cell::Cell<Option<String>> = std::cell::Cell::new(None);
     let try_choice = |choice: &[Ty]| -> Option<Instance> {
         attempts.set(attempts.get() + 1);
-        let args = build_args(choice);
+        let args = instantiate_generic_args(&identity_args, choice);
         if !args_satisfy_predicates(tcx, def, &args) {
             return None;
         }

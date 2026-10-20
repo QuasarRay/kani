@@ -189,46 +189,40 @@ pub fn parse_config(args: Vec<String>) -> Config {
 }
 
 pub fn log_config(config: &Config) {
-    let c = config;
-    logv(c, "configuration:".to_string());
-    logv(c, format!("src_base: {:?}", config.src_base.display()));
-    logv(c, format!("build_base: {:?}", config.build_base.display()));
-    logv(c, format!("mode: {}", config.mode));
-    logv(c, format!("run_ignored: {}", config.run_ignored));
-    logv(c, format!("filters: {:?}", config.filters));
-    logv(c, format!("filter_exact: {}", config.filter_exact));
-    logv(c, format!("target: {}", config.target));
-    logv(c, format!("host: {}", config.host));
-    logv(c, format!("verbose: {}", config.verbose));
-    logv(c, format!("quiet: {}", config.quiet));
-    logv(c, format!("timeout: {:?}", config.timeout));
-    logv(c, format!("fail-fast: {:?}", config.fail_fast));
-    logv(c, format!("dry-run: {:?}", config.dry_run));
-    logv(c, format!("fix-expected: {:?}", config.fix_expected));
-    logv(c, format!("require-success: {:?}", config.require_success));
-    logv(
-        c,
+    for line in [
+        "configuration:".to_string(),
+        format!("src_base: {:?}", config.src_base.display()),
+        format!("build_base: {:?}", config.build_base.display()),
+        format!("mode: {}", config.mode),
+        format!("run_ignored: {}", config.run_ignored),
+        format!("filters: {:?}", config.filters),
+        format!("filter_exact: {}", config.filter_exact),
+        format!("target: {}", config.target),
+        format!("host: {}", config.host),
+        format!("verbose: {}", config.verbose),
+        format!("quiet: {}", config.quiet),
+        format!("timeout: {:?}", config.timeout),
+        format!("fail-fast: {:?}", config.fail_fast),
+        format!("dry-run: {:?}", config.dry_run),
+        format!("fix-expected: {:?}", config.fix_expected),
+        format!("require-success: {:?}", config.require_success),
         format!(
             "parallelism: RUST_TEST_THREADS={:?}, available_parallelism={}",
             env::var("RUST_TEST_THREADS").ok(),
             std::thread::available_parallelism().unwrap()
         ),
-    );
-    logv(c, "\n".to_string());
+        "\n".to_string(),
+    ] {
+        logv(config, line);
+    }
 }
 
 pub fn opt_str(maybestr: &Option<String>) -> &str {
-    match *maybestr {
-        None => "(none)",
-        Some(ref s) => s,
-    }
+    maybestr.as_deref().unwrap_or("(none)")
 }
 
 pub fn opt_str2(maybestr: Option<String>) -> String {
-    match maybestr {
-        None => "(none)".to_owned(),
-        Some(s) => s,
-    }
+    maybestr.unwrap_or_else(|| "(none)".to_owned())
 }
 
 pub fn run_tests(config: Config) {
@@ -251,12 +245,8 @@ pub fn run_tests(config: Config) {
 
     let opts = test_opts(&config);
 
-    let configs = vec![config.clone()];
-
     let mut tests = Vec::new();
-    for c in &configs {
-        make_tests(c, &mut tests);
-    }
+    make_tests(&config, &mut tests);
 
     if config.dry_run {
         print_msg(&config, format!("Number of Tests: {}", tests.len()));
@@ -344,17 +334,18 @@ fn common_inputs_stamp() -> Stamp {
     // Create stamp based on the `kani-compiler` binary
     let mut stamp = Stamp::from_path(kani_bin_path);
 
-    // Add source, library and script directories
-    stamp.add_dir(&rust_src_dir.join("src/"));
-    stamp.add_dir(&rust_src_dir.join("kani-compiler/"));
-    stamp.add_dir(&rust_src_dir.join("kani-driver/"));
-    stamp.add_dir(&rust_src_dir.join("kani_metadata/"));
-    stamp.add_dir(&rust_src_dir.join("cprover_bindings/"));
-    stamp.add_dir(&rust_src_dir.join("library/"));
-    stamp.add_dir(&rust_src_dir.join("scripts/"));
-
-    // Add relevant tools directories
-    stamp.add_dir(&rust_src_dir.join("tools/compiletest/"));
+    for dir in [
+        "src",
+        "kani-compiler",
+        "kani-driver",
+        "kani_metadata",
+        "cprover_bindings",
+        "library",
+        "scripts",
+        "tools/compiletest",
+    ] {
+        stamp.add_dir(&rust_src_dir.join(dir));
+    }
 
     stamp
 }
@@ -375,6 +366,12 @@ fn collect_tests_from_dir(
     }
 }
 
+fn prepare_build_dir(config: &Config, relative_dir: &Path) -> PathBuf {
+    let build_dir = output_relative_path(config, relative_dir);
+    fs::create_dir_all(&build_dir).unwrap();
+    build_dir
+}
+
 fn collect_expected_tests_from_dir(
     config: &Config,
     dir: &Path,
@@ -382,14 +379,7 @@ fn collect_expected_tests_from_dir(
     inputs: &Stamp,
     tests: &mut Vec<test::TestDescAndFn>,
 ) -> io::Result<()> {
-    // If we find a test foo/bar.rs, we have to build the
-    // output directory `$build/foo` so we can write
-    // `$build/foo/bar` into it. We do this *now* in this
-    // sequential loop because otherwise, if we do it in the
-    // tests themselves, they race for the privilege of
-    // creating the directories and sometimes fail randomly.
-    let build_dir = output_relative_path(config, relative_dir_path);
-    fs::create_dir_all(&build_dir).unwrap();
+    let build_dir = prepare_build_dir(config, relative_dir_path);
 
     // If we find a `Cargo.toml` file in the current directory and we're in
     // Cargo-kani mode, we should look for `*.expected` files and create an
@@ -442,14 +432,7 @@ fn collect_exec_tests_from_dir(
     inputs: &Stamp,
     tests: &mut Vec<test::TestDescAndFn>,
 ) -> io::Result<()> {
-    // If we find a test `foo/bar.rs`, we have to build the
-    // output directory `$build/foo` so we can write
-    // `$build/foo/bar` into it. We do this *now* in this
-    // sequential loop because otherwise, if we do it in the
-    // tests themselves, they race for the privilege of
-    // creating the directories and sometimes fail randomly.
-    let build_dir = output_relative_path(config, relative_dir_path);
-    fs::create_dir_all(&build_dir).unwrap();
+    let build_dir = prepare_build_dir(config, relative_dir_path);
 
     // Ensure the mode we're running is `Mode::Exec`
     assert!(config.mode == Mode::Exec);
@@ -482,14 +465,7 @@ fn collect_rs_tests_from_dir(
     inputs: &Stamp,
     tests: &mut Vec<test::TestDescAndFn>,
 ) -> io::Result<()> {
-    // If we find a test foo/bar.rs, we have to build the
-    // output directory `$build/foo` so we can write
-    // `$build/foo/bar` into it. We do this *now* in this
-    // sequential loop because otherwise, if we do it in the
-    // tests themselves, they race for the privilege of
-    // creating the directories and sometimes fail randomly.
-    let build_dir = output_relative_path(config, relative_dir_path);
-    fs::create_dir_all(build_dir).unwrap();
+    prepare_build_dir(config, relative_dir_path);
 
     // Add each `.rs` file as a test, and recurse further on any
     // subdirectories we find, except for `aux` directories.
@@ -518,22 +494,13 @@ fn collect_rs_tests_from_dir(
 /// Returns true if `file_name` looks like a proper test file name.
 pub fn is_test(file_name: &OsString) -> bool {
     let file_name = file_name.to_str().unwrap();
-
-    if !file_name.ends_with(".rs") {
-        return false;
-    }
-
-    // `.`, `#`, and `~` are common temp-file prefixes.
-    let invalid_prefixes = &[".", "#", "~"];
-    !invalid_prefixes.iter().any(|p| file_name.starts_with(p))
+    file_name.ends_with(".rs") && ![".", "#", "~"].iter().any(|p| file_name.starts_with(p))
 }
 
 fn make_test(config: &Config, testpaths: &TestPaths, inputs: &Stamp) -> test::TestDescAndFn {
-    let test_path = PathBuf::from(&testpaths.file);
-
-    let src_file = std::fs::File::open(&test_path).expect("open test file to parse ignores");
+    let src_file = std::fs::File::open(&testpaths.file).expect("open test file to parse ignores");
     let test_name = crate::make_test_name(config, testpaths);
-    let mut desc = make_test_description(config, test_name, &test_path, src_file);
+    let mut desc = make_test_description(config, test_name, &testpaths.file, src_file);
     // Ignore tests that already run and are up to date with respect to inputs.
     if !config.force_rerun {
         desc.ignore |= is_up_to_date(config, testpaths, inputs);
@@ -546,11 +513,8 @@ fn stamp(config: &Config, testpaths: &TestPaths) -> PathBuf {
 }
 
 fn is_up_to_date(config: &Config, testpaths: &TestPaths, inputs: &Stamp) -> bool {
-    let stamp_name = stamp(config, testpaths);
     // Check timestamps.
-    let inputs = inputs.clone();
-
-    inputs < Stamp::from_path(&stamp_name)
+    inputs < &Stamp::from_path(&stamp(config, testpaths))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -560,7 +524,7 @@ struct Stamp {
 
 impl Stamp {
     fn from_path(path: &Path) -> Self {
-        let mut stamp = Stamp { time: SystemTime::UNIX_EPOCH };
+        let mut stamp = Self { time: SystemTime::UNIX_EPOCH };
         stamp.add_path(path);
         stamp
     }
@@ -573,16 +537,9 @@ impl Stamp {
     }
 
     fn add_dir(&mut self, path: &Path) {
-        for entry in WalkDir::new(path) {
-            let entry = entry.unwrap();
-            if entry.file_type().is_file() {
-                let modified = entry
-                    .metadata()
-                    .ok()
-                    .and_then(|metadata| metadata.modified().ok())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                self.time = self.time.max(modified);
-            }
+        for entry in WalkDir::new(path).map(|entry| entry.unwrap()).filter(|entry| entry.file_type().is_file())
+        {
+            self.add_path(entry.path());
         }
     }
 }

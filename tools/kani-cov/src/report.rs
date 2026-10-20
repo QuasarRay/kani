@@ -3,18 +3,21 @@
 
 //! This module includes the implementation of the `report` subcommand.
 
-use std::io::{BufRead, IsTerminal};
-use std::{fs::File, io::BufReader, path::PathBuf};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader, IsTerminal},
+    path::PathBuf,
+};
 
 use anyhow::Result;
 
 use crate::args::ReportFormat;
 use crate::coverage::{
     ColumnNumber, CovResult, LineNumber, LineResults, MarkerInfo, function_coverage_results,
-    function_info_from_file,
+    function_info_from_file, load_coverage_inputs,
 };
 use crate::summary::line_coverage_results;
-use crate::{args::ReportArgs, coverage::CombinedCoverageResults};
+use crate::args::ReportArgs;
 
 /// Executes the `report` subcommand.
 ///
@@ -23,16 +26,7 @@ use crate::{args::ReportArgs, coverage::CombinedCoverageResults};
 /// associated coverage information on a per-function basis, producing a
 /// human-readable report for each one of the files.
 pub fn report_main(args: &ReportArgs) -> Result<()> {
-    let mapfile = File::open(&args.mapfile)?;
-    let reader = BufReader::new(mapfile);
-
-    let covfile = File::open(&args.profile)?;
-    let covreader = BufReader::new(covfile);
-    let results: CombinedCoverageResults =
-        serde_json::from_reader(covreader).expect("could not load coverage results");
-
-    let source_files: Vec<PathBuf> =
-        serde_json::from_reader(reader).expect("could not parse coverage metadata");
+    let (results, source_files) = load_coverage_inputs(&args.mapfile, &args.profile)?;
 
     let checked_format = check_format(&args.format);
 
@@ -52,12 +46,6 @@ pub fn report_main(args: &ReportArgs) -> Result<()> {
     Ok(())
 }
 
-/// Validate arguments to the `report` subcommand in addition to clap's
-/// validation.
-pub fn validate_report_args(_args: &ReportArgs) -> Result<()> {
-    // No validation is done at the moment
-    Ok(())
-}
 
 /// Checks the `format` argument for the `report` subcommand and selects to
 /// another format if the one we are checking is not possible for any reason.
@@ -66,16 +54,9 @@ pub fn validate_report_args(_args: &ReportArgs) -> Result<()> {
 /// a terminal, it will auto-select the `Escapes` format to avoid character
 /// issues.
 fn check_format(format: &ReportFormat) -> ReportFormat {
-    let is_terminal = std::io::stdout().is_terminal();
     match format {
-        ReportFormat::Terminal => {
-            if is_terminal {
-                ReportFormat::Terminal
-            } else {
-                ReportFormat::Escapes
-            }
-        }
-        ReportFormat::Escapes => ReportFormat::Escapes,
+        ReportFormat::Terminal if std::io::stdout().is_terminal() => ReportFormat::Terminal,
+        ReportFormat::Terminal | ReportFormat::Escapes => ReportFormat::Escapes,
     }
 }
 
@@ -134,53 +115,35 @@ pub fn output_coverage_results(
                     (Some(max), insert_escapes(&line, vec![(0, true), (line.len(), false)], format))
                 }
                 MarkerInfo::Markers(results) => {
-                    // Escapes for the regions which start and finish in this line
-                    let complete_escapes: Vec<(ColumnNumber, bool)> = results
+                    let opening = results.iter().any(|m| {
+                        m.times_covered == 0 && m.region.start.0 == idx && m.region.end.0 != idx
+                    });
+                    let closing = results.iter().any(|m| {
+                        m.times_covered == 0 && m.region.start.0 != idx && m.region.end.0 == idx
+                    });
+                    let mut escapes = results
                         .iter()
-                        .filter(|m| {
-                            m.times_covered == 0 && m.region.start.0 == idx && m.region.end.0 == idx
+                        .filter(|m| m.times_covered == 0)
+                        .flat_map(|m| match (m.region.start.0 == idx, m.region.end.0 == idx) {
+                            (true, true) => {
+                                vec![(m.region.start.1 - 1, true), (m.region.end.1 - 1, false)]
+                            }
+                            (true, false) => vec![(m.region.start.1 - 1, true)],
+                            (false, true) => vec![(m.region.end.1 - 1, false)],
+                            (false, false) => vec![],
                         })
-                        .flat_map(|m| {
-                            vec![((m.region.start.1 - 1), true), ((m.region.end.1 - 1), false)]
-                        })
-                        .collect();
-                    // Escapes for the regions which only start in this line
-                    let mut opening_escapes: Vec<(ColumnNumber, bool)> = results
-                        .iter()
-                        .filter(|m| {
-                            m.times_covered == 0 && m.region.start.0 == idx && m.region.end.0 != idx
-                        })
-                        .flat_map(|m| vec![((m.region.start.1 - 1), true)])
-                        .collect();
-                    // Escapes for the regions which only finish in this line
-                    let mut closing_escapes: Vec<(ColumnNumber, bool)> = results
-                        .iter()
-                        .filter(|m| {
-                            m.times_covered == 0 && m.region.start.0 != idx && m.region.end.0 == idx
-                        })
-                        .flat_map(|m| vec![((m.region.end.1 - 1), false)])
-                        .collect();
+                        .collect::<Vec<(ColumnNumber, bool)>>();
 
-                    // Emit an opening escape if there was a closing one and we
-                    // had to continue the highlight
-                    if must_highlight && !closing_escapes.is_empty() {
-                        closing_escapes.push((0, true));
+                    if must_highlight && closing {
+                        escapes.push((0, true));
                         must_highlight = false;
                     }
-                    // Continue the highlight in the next lines if we had an
-                    // opening escape
-                    if !opening_escapes.is_empty() {
-                        opening_escapes.push((line.len(), false));
+                    if opening {
+                        escapes.push((line.len(), false));
                         must_highlight = true;
                     }
-
-                    // Join all the escapes, then insert them
-                    closing_escapes.extend(complete_escapes);
-                    closing_escapes.extend(opening_escapes);
-
-                    if must_highlight && closing_escapes.is_empty() {
-                        closing_escapes.push((0, true));
-                        closing_escapes.push((line.len(), false));
+                    if must_highlight && escapes.is_empty() {
+                        escapes.extend([(0, true), (line.len(), false)]);
                     }
 
                     // If any result points to an out-of-bounds region after the
@@ -226,13 +189,12 @@ fn results_with_nonexisting_regions_in_line(
     line: &str,
     idx: LineNumber,
 ) -> bool {
-    let results_with_oob_regions = results.iter().filter(|m| {
+    results.iter().any(|m| {
         m.region.start.0 == idx
             && m.region.end.0 == idx
-            && (m.region.end.1 - m.region.start.1 == 1)
-            && (m.region.end.1) > line.len()
-    });
-    results_with_oob_regions.count() > 0
+            && m.region.end.1 - m.region.start.1 == 1
+            && m.region.end.1 > line.len()
+    })
 }
 
 /// Inserts opening/closing escape strings into `str` given a set of `markers`.
@@ -242,27 +204,23 @@ fn results_with_nonexisting_regions_in_line(
 ///    escape.
 ///
 /// The specific escape to be used are determined by the report format.
-fn insert_escapes(str: &str, markers: Vec<(ColumnNumber, bool)>, format: &ReportFormat) -> String {
-    // Determine the escape strings based on the format
-    let (open_escape, close_escape) = match format {
+fn insert_escapes(
+    str: &str,
+    mut markers: Vec<(ColumnNumber, bool)>,
+    format: &ReportFormat,
+) -> String {
+    let (open, close) = match format {
         ReportFormat::Terminal => ("\x1b[41m", "\x1b[0m"),
         ReportFormat::Escapes => ("```", "'''"),
     };
+    markers.sort();
 
-    let mut escape_markers: Vec<(&ColumnNumber, &str)> =
-        markers.iter().map(|(i, b)| (i, if *b { open_escape } else { close_escape })).collect();
-    escape_markers.sort();
-
-    let mut escaped_str = str.to_owned();
+    let mut escaped = str.to_owned();
     let mut offset = 0;
-
-    // Iteratively insert the escape strings into the original string
-    for (i, b) in escape_markers {
-        escaped_str.insert_str(i + offset, b);
-        // `offset` keeps track of the bytes we've already inserted so the original
-        // index is shifted by the appropriate amount in subsequent insertions.
-        // Note that b.len() returns the length of the string in bytes, c.f. https://doc.rust-lang.org/std/string/struct.String.html#method.len
-        offset += b.len();
+    for (i, opening) in markers {
+        let escape = if opening { open } else { close };
+        escaped.insert_str(i + offset, escape);
+        offset += escape.len();
     }
-    escaped_str
+    escaped
 }

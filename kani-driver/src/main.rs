@@ -222,8 +222,8 @@ fn verify_project(project: Project, session: KaniSession) -> Result<()> {
 
     if let Some(handler) = handler.as_mut() {
         // Process harness results and add additional metadata using frontend utility function
-        process_harness_results(handler, &harnesses, &results)?;
-        process_cbmc_results(handler, &harnesses, &results, &session)?;
+        process_harness_results(handler, &harnesses, &results);
+        process_cbmc_results(handler, &harnesses, &results, &session);
     }
 
     if session.args.coverage {

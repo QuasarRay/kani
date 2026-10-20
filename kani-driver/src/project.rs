@@ -153,13 +153,11 @@ impl Project {
             let goto = Artifact::try_new(&link_job.output, Goto)?;
 
             // All other harness artifacts that may have been generated as part of the build.
-            let mut artifacts = [SymTab, TypeMap, VTableRestriction, PrettyNameMap]
+            Ok([SymTab, TypeMap, VTableRestriction, PrettyNameMap]
                 .iter()
                 .filter_map(|typ| Artifact::try_from(&symtab_out, *typ).ok())
-                .collect::<Vec<_>>();
-            artifacts.push(symtab_out);
-            artifacts.push(goto);
-            Ok(artifacts)
+                .chain([symtab_out, goto])
+                .collect())
         };
 
         let artifacts = execute_link_jobs(&link_jobs, session.args.jobs(), build_artifacts)?
@@ -196,7 +194,7 @@ impl Deref for Artifact {
 impl Artifact {
     /// Create a new artifact if the given path exists.
     pub fn try_new(path: &Path, typ: ArtifactType) -> Result<Self> {
-        Ok(Artifact {
+        Ok(Self {
             path: path.canonicalize().context(format!("Failed to process {}", path.display()))?,
             typ,
         })
@@ -274,7 +272,7 @@ impl<'a> StandaloneProjectBuilder<'a> {
         } else {
             input.canonicalize().unwrap().parent().unwrap().to_path_buf()
         };
-        let crate_name = if let Some(name) = krate_name { name } else { crate_name(input) };
+        let crate_name = krate_name.unwrap_or_else(|| crate_name(input));
         let metadata = standalone_artifact(&outdir, &crate_name, Metadata);
         Ok(StandaloneProjectBuilder {
             outdir,

@@ -12,6 +12,8 @@ publish = false
 cbmc = { path = "../cprover_bindings", package = "cprover_bindings", optional = true }
 charon = { path = "../charon/charon", optional = true, default-features = false } 
 clap = { version = "4.4.11", features = ["derive", "cargo"] }
+comprende = { git = "https://github.com/QuasarRay/comprende", rev = "645141dd7bedd91c302b08daf93317ea6f87396e" }
+derive-deftly = "=1.14.0"
 indexmap = { version = "2.7.1", features = ["serde"] }
 itertools = "0.15"
 kani_metadata = { path = "../kani_metadata" }

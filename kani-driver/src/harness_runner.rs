@@ -216,11 +216,18 @@ impl KaniSession {
         !self.args.common_args.quiet && self.args.output_format() != OutputFormat::Old
     }
 
+    fn emit_worker_line(&self, line: &str, thread_index: usize) {
+        if rayon::current_num_threads() > 1 {
+            self.emit_line(&format!("Thread {thread_index}: {line}"));
+        } else {
+            self.emit_line(line);
+        }
+    }
+
     fn write_output_to_file(&self, result: &VerificationResult, harness: &HarnessMetadata) {
         let target_dir = self.result_output_dir().unwrap();
         let file_name = target_dir.join(harness.pretty_name.clone());
-        let path = Path::new(&file_name);
-        let prefix = path.parent().unwrap();
+        let prefix = file_name.parent().unwrap();
 
         std::fs::create_dir_all(prefix).unwrap();
         let mut file = File::create(&file_name).unwrap();
@@ -249,7 +256,7 @@ impl KaniSession {
         let thread_index = rayon::current_thread_index().unwrap_or_default();
         if !self.args.common_args.quiet {
             // If the harness is automatically generated, pretty_name refers to the function under verification.
-            let mut msg = if harness.is_automatically_generated {
+            let msg = if harness.is_automatically_generated {
                 // A bounded harness only explores some arguments up to a bound, so it does not
                 // check *all* possible inputs; qualify the message accordingly so a bounded run
                 // does not masquerade as exhaustive (c.f. the "(bounded)" marker in the summary).
@@ -273,27 +280,17 @@ impl KaniSession {
                 format!("Checking harness {}...", harness.pretty_name)
             };
 
-            if rayon::current_num_threads() > 1 {
-                msg = format!("Thread {thread_index}: {msg}");
-            }
+            self.emit_worker_line(&msg, thread_index);
 
-            self.emit_line(&msg);
-
-            // Print stubs applied to this harness so users know which
-            // assumptions are in effect.
-            let multi = rayon::current_num_threads() > 1;
-            let print_line = |line: String| {
-                if multi {
-                    self.emit_line(&format!("Thread {thread_index}: {line}"));
-                } else {
-                    self.emit_line(&line);
-                }
-            };
+            // Print stubs applied to this harness so users know which assumptions are in effect.
             for stub in &harness.attributes.stubs {
-                print_line(format!("  - Stub: {} -> {}", stub.original, stub.replacement));
+                self.emit_worker_line(
+                    &format!("  - Stub: {} -> {}", stub.original, stub.replacement),
+                    thread_index,
+                );
             }
             for verified in &harness.attributes.verified_stubs {
-                print_line(format!("  - Verified stub: {verified}"));
+                self.emit_worker_line(&format!("  - Verified stub: {verified}"), thread_index);
             }
         }
 
@@ -308,13 +305,14 @@ impl KaniSession {
     pub(crate) fn print_final_summary(&self, results: &[HarnessResult<'_>]) -> Result<()> {
         let (automatic, manual): (Vec<_>, Vec<_>) =
             results.iter().partition(|r| r.harness.is_automatically_generated);
-
-        let (successes, failures): (Vec<_>, Vec<_>) =
-            manual.into_iter().partition(|r| r.result.status == VerificationStatus::Success);
-
-        let succeeding = successes.len();
+        let failures = manual
+            .iter()
+            .filter(|r| r.result.status != VerificationStatus::Success)
+            .copied()
+            .collect::<Vec<_>>();
         let failing = failures.len();
-        let total = succeeding + failing;
+        let succeeding = manual.len() - failing;
+        let total = manual.len();
 
         if self.args.concrete_playback.is_some() {
             if failures.is_empty() {
@@ -354,10 +352,6 @@ impl KaniSession {
             };
         }
 
-        if self.args.coverage {
-            self.show_coverage_summary()?;
-        }
-
         if self.autoharness_compiler_flags.is_some() {
             self.print_autoharness_summary(automatic);
         }
@@ -389,12 +383,6 @@ impl KaniSession {
         Ok(())
     }
 
-    /// Show a coverage summary.
-    ///
-    /// This is just a placeholder for now.
-    fn show_coverage_summary(&self) -> Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

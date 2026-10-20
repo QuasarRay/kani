@@ -13,6 +13,7 @@ use self::common::*;
 use crate::args::cargo::CargoTargetArgs;
 use crate::util::warning;
 use cargo::CargoCommonArgs;
+use derive_deftly::{Deftly, define_derive_deftly};
 use clap::builder::{PossibleValue, TypedValueParser};
 use clap::{ValueEnum, error::ContextKind, error::ContextValue, error::Error, error::ErrorKind};
 use kani_metadata::CbmcSolver;
@@ -217,12 +218,33 @@ pub enum CargoKaniSubcommand {
 // Common arguments for invoking Kani for verification purpose. This gets put into KaniContext,
 // whereas anything above is "local" to "main"'s control flow.
 // When adding an argument to this struct, make sure that it's in alphabetical order as displayed to the user when running --help.
-#[derive(Debug, clap::Args)]
+define_derive_deftly! {
+    ValidateUnstableOptions:
+    impl $ttype {
+        fn validate_unstable_options(&self) -> Result<(), Error> {
+            $(
+                ${when fmeta(unstable)}
+                self.common_args.check_unstable(
+                    ${if fmeta(unstable(option)) { self.$fname.is_some() }
+                      else if fmeta(unstable(vec)) { !self.$fname.is_empty() }
+                      else { self.$fname }},
+                    ${fmeta(unstable(name)) as expr},
+                    ${fmeta(unstable(feature)) as expr},
+                )?;
+            )
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug, clap::Args, Deftly)]
+#[derive_deftly(ValidateUnstableOptions)]
 #[clap(next_help_heading = "Verification Options")]
 pub struct VerificationArgs {
     /// Link external C files referenced by Rust code.
     /// This is an experimental feature and requires `-Z c-ffi` to be used
     #[arg(long, hide = true, num_args(1..))]
+    #[deftly(unstable(vec, name = "c-lib", feature = UnstableFeature::CFfi))]
     pub c_lib: Vec<PathBuf>,
 
     /// Pass through directly to CBMC; must be the last flag.
@@ -233,6 +255,7 @@ pub struct VerificationArgs {
         num_args(0..)
     )]
     // consumes everything
+    #[deftly(unstable(vec, name = "cbmc-args", feature = UnstableFeature::UnstableOptions))]
     pub cbmc_args: Vec<OsString>,
 
     /// Generate concrete playback unit test.
@@ -240,10 +263,12 @@ pub struct VerificationArgs {
     /// If value supplied is 'inplace', Kani automatically adds the unit test to your source code.
     /// This option does not work with `--output-format old`.
     #[arg(long, ignore_case = true, value_enum)]
+    #[deftly(unstable(option, name = "concrete-playback", feature = UnstableFeature::ConcretePlayback))]
     pub concrete_playback: Option<ConcretePlaybackMode>,
 
     /// Enable Kani coverage output alongside verification result
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "coverage", feature = UnstableFeature::SourceCoverage))]
     pub coverage: bool,
 
     /// Specify the value used for loop unwinding in CBMC
@@ -253,6 +278,7 @@ pub struct VerificationArgs {
     /// Output the verification results to a JSON file at the specified path.
     /// This feature is unstable and it requires `-Z unstable-options` to be used
     #[arg(long)]
+    #[deftly(unstable(option, name = "export-json", feature = UnstableFeature::UnstableOptions))]
     pub export_json: Option<PathBuf>,
 
     /// When specified, the harness filter will only match the exact fully qualified name of a harness
@@ -264,6 +290,7 @@ pub struct VerificationArgs {
     /// This feature is unstable and it may yield false counter examples. It requires
     /// `-Z unstable-options` to be used
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "extra-pointer-checks", feature = UnstableFeature::UnstableOptions))]
     pub extra_pointer_checks: bool,
 
     /// Stop the verification process as soon as one of the harnesses fails.
@@ -279,6 +306,7 @@ pub struct VerificationArgs {
     /// Generate C file equivalent to inputted program for debug purpose.
     /// This feature is unstable, and it requires `-Z unstable-options` to be used
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "gen-c", feature = UnstableFeature::UnstableOptions))]
     pub gen_c: bool,
 
     /// If specified, only run harnesses that match this filter. This option can be provided
@@ -289,11 +317,13 @@ pub struct VerificationArgs {
 
     /// Timeout for each harness with optional suffix ('s': seconds, 'm': minutes, 'h': hours). Default is seconds. This option is experimental and requires `-Z unstable-options` to be used.
     #[arg(long)]
+    #[deftly(unstable(option, name = "harness-timeout", feature = UnstableFeature::UnstableOptions))]
     pub harness_timeout: Option<Timeout>,
 
     /// Do not error out for crates containing `global_asm!`.
     /// This option may impact the soundness of the analysis and may cause false proofs and/or counterexamples
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "ignore-asm", feature = UnstableFeature::UnstableOptions))]
     pub ignore_global_asm: bool,
 
     /// Do not replace `assert!`, `panic!`, and related macros with Kani's versions.
@@ -317,6 +347,7 @@ pub struct VerificationArgs {
 
     /// Do not assert the function contracts of dependencies. Requires -Z function-contracts.
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "no-assert", feature = UnstableFeature::FunctionContracts))]
     pub no_assert_contracts: bool,
 
     /// Turn off assertion reachability checks
@@ -326,14 +357,17 @@ pub struct VerificationArgs {
     /// Run Kani without codegen. Useful for quick feedback on whether the code would compile successfully (similar to `cargo check`).
     /// This feature is unstable and requires `-Z unstable-options` to be used
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "no-codegen", feature = UnstableFeature::UnstableOptions))]
     pub no_codegen: bool,
 
     /// Disable restricting the targets of virtual table function pointer calls
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "no-restrict-vtable", feature = UnstableFeature::RestrictVtable))]
     pub no_restrict_vtable: bool,
 
     /// Disable CBMC's slice formula which prevents values from being assigned to redundant variables in traces.
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "no-slice-formula", feature = UnstableFeature::UnstableOptions))]
     pub no_slice_formula: bool,
 
     /// Kani will only compile the crate. No verification will be performed
@@ -348,6 +382,7 @@ pub struct VerificationArgs {
 
     /// Write verification results into per-harness files, rather than to stdout
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "output-into-files", feature = UnstableFeature::UnstableOptions))]
     pub output_into_files: bool,
 
     /// Write verbose and terse log output to the specified file.
@@ -358,11 +393,13 @@ pub struct VerificationArgs {
 
     /// Print final LLBC for Lean backend. This requires the `-Z lean` option.
     #[arg(long, hide = true)]
+    #[deftly(unstable(name = "print-llbc", feature = UnstableFeature::Lean))]
     pub print_llbc: bool,
 
     /// Compute verification results under the assumption that no panic occurs.
     /// This feature is unstable, and it requires `-Z unstable-options` to be used
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "prove-safety-only", feature = UnstableFeature::UnstableOptions))]
     pub prove_safety_only: bool,
 
     /// Randomize the layout of structures. This option can help catching code that relies on
@@ -379,6 +416,7 @@ pub struct VerificationArgs {
 
     /// Execute CBMC's sanity checks to ensure the goto-program we generate is correct.
     #[arg(long, hide_short_help = true)]
+    #[deftly(unstable(name = "run-sanity-checks", feature = UnstableFeature::UnstableOptions))]
     pub run_sanity_checks: bool,
 
     /// Write SARIF output (Static Analysis Results Interchange Format) to the given path.
@@ -397,6 +435,7 @@ pub struct VerificationArgs {
         conflicts_with("unwind"),
         conflicts_with("default_unwind")
     )]
+    #[deftly(unstable(name = "synthesize-loop-contracts", feature = UnstableFeature::UnstableOptions))]
     pub synthesize_loop_contracts: bool,
 
     /// Directory for all generated artifacts.
@@ -462,11 +501,7 @@ impl NumThreads {
 
     /// Checks if this will spawn multiple threads in the pool.
     pub fn will_multithread(&self) -> bool {
-        match self {
-            Self::UserSpecified(x) if *x != 1 => true,
-            Self::ThreadPoolDefault => true,
-            _ => false,
-        }
+        !matches!(self, Self::NoMultithreading | Self::UserSpecified(1))
     }
 }
 
@@ -688,7 +723,7 @@ where
     T: ValidateArgs,
 {
     fn validate(&self) -> Result<(), Error> {
-        self.as_ref().map_or(Ok(()), |inner| inner.validate())
+        self.as_ref().map_or(Ok(()), ValidateArgs::validate)
     }
 }
 
@@ -704,9 +739,7 @@ impl ValidateArgs for CargoKaniSubcommand {
 
 impl ValidateArgs for CargoKaniArgs {
     fn validate(&self) -> Result<(), Error> {
-        self.verify_opts.validate()?;
-        self.command.validate()?;
-        Ok(())
+        self.verify_opts.validate().and_then(|_| self.command.validate())
     }
 }
 
@@ -714,114 +747,7 @@ impl ValidateArgs for VerificationArgs {
     fn validate(&self) -> Result<(), Error> {
         self.common_args.validate()?;
 
-        // check_unstable() calls: for each unstable option, check that the requisite unstable feature is provided.
-        let unstable = || -> Result<(), Error> {
-            self.common_args.check_unstable(
-                self.concrete_playback.is_some(),
-                "concrete-playback",
-                UnstableFeature::ConcretePlayback,
-            )?;
-
-            self.common_args.check_unstable(
-                !self.c_lib.is_empty(),
-                "c-lib",
-                UnstableFeature::CFfi,
-            )?;
-
-            self.common_args.check_unstable(
-                self.gen_c,
-                "gen-c",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                !self.cbmc_args.is_empty(),
-                "cbmc-args",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.no_codegen,
-                "no-codegen",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.extra_pointer_checks,
-                "extra-pointer-checks",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.ignore_global_asm,
-                "ignore-asm",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.run_sanity_checks,
-                "run-sanity-checks",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.no_slice_formula,
-                "no-slice-formula",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.synthesize_loop_contracts,
-                "synthesize-loop-contracts",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.no_restrict_vtable,
-                "no-restrict-vtable",
-                UnstableFeature::RestrictVtable,
-            )?;
-
-            self.common_args.check_unstable(
-                self.coverage,
-                "coverage",
-                UnstableFeature::SourceCoverage,
-            )?;
-            self.common_args.check_unstable(
-                self.output_into_files,
-                "output-into-files",
-                UnstableFeature::UnstableOptions,
-            )?;
-            self.common_args.check_unstable(
-                self.print_llbc,
-                "print-llbc",
-                UnstableFeature::Lean,
-            )?;
-            self.common_args.check_unstable(
-                self.harness_timeout.is_some(),
-                "harness-timeout",
-                UnstableFeature::UnstableOptions,
-            )?;
-            self.common_args.check_unstable(
-                self.no_assert_contracts,
-                "no-assert",
-                UnstableFeature::FunctionContracts,
-            )?;
-
-            self.common_args.check_unstable(
-                self.prove_safety_only,
-                "prove-safety-only",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            self.common_args.check_unstable(
-                self.export_json.is_some(),
-                "export-json",
-                UnstableFeature::UnstableOptions,
-            )?;
-
-            Ok(())
-        };
+        self.validate_unstable_options()?;
 
         // Check for argument conflicts.
         let conflicting_options = || -> Result<(), Error> {
@@ -973,7 +899,6 @@ impl ValidateArgs for VerificationArgs {
             Ok(())
         };
 
-        unstable()?;
         conflicting_options()?;
         deprecated_stabilized_obsolete()?;
 
@@ -1025,37 +950,37 @@ impl ValidateArgs for VerificationArgs {
 
 pub(crate) fn validate_std_path(std_path: &Path) -> Result<(), Error> {
     if !std_path.exists() {
-        Err(Error::raw(
+        return Err(Error::raw(
             ErrorKind::InvalidValue,
             format!(
                 "Invalid argument: `<STD_PATH>` argument `{}` does not exist",
                 std_path.display()
             ),
-        ))
-    } else if !std_path.is_dir() {
-        Err(Error::raw(
+        ));
+    }
+    if !std_path.is_dir() {
+        return Err(Error::raw(
             ErrorKind::InvalidValue,
             format!(
                 "Invalid argument: `<STD_PATH>` argument `{}` is not a directory",
                 std_path.display()
             ),
-        ))
+        ));
+    }
+    let full_path = std_path.canonicalize()?;
+    let dir = full_path.file_stem().unwrap();
+    if dir == "library" {
+        Ok(())
     } else {
-        let full_path = std_path.canonicalize()?;
-        let dir = full_path.file_stem().unwrap();
-        if dir != "library" {
-            Err(Error::raw(
-                ErrorKind::InvalidValue,
-                format!(
-                    "Invalid argument: Expected `<STD_PATH>` to point to the `library` folder \
-                containing the standard library crates.\n\
-                Found `{}` folder instead",
-                    dir.to_string_lossy()
-                ),
-            ))
-        } else {
-            Ok(())
-        }
+        Err(Error::raw(
+            ErrorKind::InvalidValue,
+            format!(
+                "Invalid argument: Expected `<STD_PATH>` to point to the `library` folder \
+            containing the standard library crates.\n\
+            Found `{}` folder instead",
+                dir.to_string_lossy()
+            ),
+        ))
     }
 }
 
@@ -1079,23 +1004,15 @@ impl TypedValueParser for CbmcSolverValueParser {
         value: &std::ffi::OsStr,
     ) -> Result<Self::Value, clap::error::Error> {
         let value = value.to_str().unwrap();
-        // `value` is one of the possible `CbmcSolver` values or `bin=<binary>`
-        let segments: Vec<&str> = value.split('=').collect();
-
         let mut err = clap::Error::new(ErrorKind::InvalidValue).with_cmd(cmd);
         err.insert(ContextKind::InvalidArg, ContextValue::String(arg.unwrap().to_string()));
         err.insert(ContextKind::InvalidValue, ContextValue::String(value.to_string()));
 
-        if segments.len() == 2 {
-            if segments[0] != "bin" {
-                return Err(err);
-            }
-            return Ok(CbmcSolver::Binary(segments[1].into()));
-        } else if segments.len() == 1 {
-            let solver = CbmcSolver::from_str(value);
-            return solver.map_err(|_| err);
+        match value.split_once('=') {
+            Some(("bin", binary)) if !binary.contains('=') => Ok(CbmcSolver::Binary(binary.into())),
+            Some(_) => Err(err),
+            None => CbmcSolver::from_str(value).map_err(|_| err),
         }
-        Err(err)
     }
 
     /// Used for the help message

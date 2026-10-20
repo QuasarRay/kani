@@ -5,6 +5,7 @@
 use crate::args::ValidateArgs;
 use crate::util::args::CargoArg;
 use clap::error::Error;
+use comprende::c;
 use std::path::PathBuf;
 
 /// Arguments that Kani pass down into Cargo essentially uninterpreted.
@@ -49,14 +50,7 @@ impl CargoCommonArgs {
     ///
     /// clap can't do this for us because it accepts multiple different delimeters
     pub fn features(&self) -> Vec<String> {
-        let mut result = Vec::new();
-
-        for s in &self.features {
-            for piece in s.split(&[' ', ',']) {
-                result.push(piece.to_owned());
-            }
-        }
-        result
+        c! { piece.to_owned() for value in &self.features for piece in value.split(&[' ', ',']) }
     }
 
     /// Convert the arguments back to a format that cargo can understand.

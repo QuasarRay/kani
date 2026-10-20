@@ -14,7 +14,7 @@ pub struct LibConfig {
 }
 
 impl LibConfig {
-    pub fn new(path: PathBuf) -> LibConfig {
+    pub fn new(path: PathBuf) -> Self {
         let sysroot = &path.parent().unwrap();
         let kani_std_rlib = path.join("libstd.rlib");
         // `noprelude`: do not inject Kani's std into the prelude (it is aliased over the real
@@ -40,11 +40,11 @@ impl LibConfig {
         ]
         .map(RustcArg::from)
         .to_vec();
-        LibConfig { args }
+        Self { args }
     }
 
-    pub fn new_no_core(path: PathBuf) -> LibConfig {
-        LibConfig {
+    pub fn new_no_core(path: PathBuf) -> Self {
+        Self {
             args: ["-L", path.to_str().unwrap(), "--extern", "kani_core"]
                 .map(RustcArg::from)
                 .to_vec(),
@@ -97,11 +97,10 @@ impl KaniSession {
         cmd.env("RUSTC_BOOTSTRAP", "1");
 
         if self.args.common_args.quiet {
-            self.run_suppress(cmd)?;
+            self.run_suppress(cmd)
         } else {
-            self.run_terminal(cmd)?;
+            self.run_terminal(cmd)
         }
-        Ok(())
     }
 
     /// Create a compiler option that represents the reachability mode.
@@ -124,7 +123,7 @@ impl KaniSession {
     /// The `kani-compiler`-specific arguments that should be passed only to the local crate
     /// being compiled.
     pub fn kani_compiler_local_flags(&self) -> Vec<KaniArg> {
-        let mut flags: Vec<KaniArg> = vec![];
+        let mut flags = Vec::new();
 
         if self.args.no_assert_overrides {
             flags.push("--no-assert-overrides".into());
@@ -177,9 +176,7 @@ impl KaniSession {
             flags.push("--no-assert-contracts".into());
         }
 
-        for harness in &self.args.harnesses {
-            flags.push(format!("--harness {harness}").into());
-        }
+        flags.extend(self.args.harnesses.iter().map(|h| format!("--harness {h}").into()));
 
         if self.args.exact {
             flags.push("--exact".into());
@@ -200,7 +197,7 @@ impl KaniSession {
 
     /// This function generates all rustc configurations required by our goto-c codegen.
     pub fn kani_rustc_flags(&self, lib_config: LibConfig) -> Vec<RustcArg> {
-        let mut flags: Vec<_> = base_rustc_flags(lib_config);
+        let mut flags = base_rustc_flags(lib_config);
         // We only use panic abort strategy for verification since we cannot handle unwind logic.
         if self.args.coverage {
             flags.extend_from_slice(

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
 use crate::call_cbmc::ExitStatus;
-use crate::cbmc_output_parser::{CheckStatus, Property, SourceLocation, TraceItem};
+use crate::cbmc_output_parser::{CheckStatus, Property, SourceLocation};
 use crate::harness_runner::HarnessResult;
 use crate::session::KaniSession;
 use anyhow::{Context, Result};
@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const SARIF_VERSION: &str = "2.1.0";
 const SARIF_SCHEMA: &str = "https://json.schemastore.org/sarif-2.1.0.json";
@@ -128,6 +128,29 @@ struct Region {
     start_column: Option<u32>,
 }
 
+fn sarif_result(
+    rule_id: String,
+    level: &'static str,
+    text: String,
+    harness: String,
+    property_name: Option<String>,
+    location: (String, u32, Option<u32>),
+) -> SarifResult {
+    let (uri, start_line, start_column) = location;
+    SarifResult {
+        rule_id,
+        level,
+        message: Message { text },
+        locations: vec![Location {
+            physical_location: PhysicalLocation {
+                artifact_location: ArtifactLocation { uri },
+                region: Region { start_line, start_column },
+            },
+        }],
+        properties: ResultProperties { harness, property_name },
+    }
+}
+
 impl SarifLog {
     fn from_harness_results(results: &[HarnessResult<'_>]) -> Self {
         let mut rules = BTreeMap::<String, ReportingDescriptor>::new();
@@ -154,31 +177,21 @@ impl SarifLog {
                             },
                         });
 
-                        let (file, line, column) = best_location(prop).unwrap_or_else(|| {
+                        let location = best_location(prop).unwrap_or_else(|| {
                             (
                                 relativize_path(&harness.original_file),
                                 harness.original_start_line as u32,
                                 None,
                             )
                         });
-
-                        sarif_results.push(SarifResult {
+                        sarif_results.push(sarif_result(
                             rule_id,
                             level,
-                            message: Message {
-                                text: format!("[{}] {}", harness.pretty_name, prop.description),
-                            },
-                            locations: vec![Location {
-                                physical_location: PhysicalLocation {
-                                    artifact_location: ArtifactLocation { uri: file },
-                                    region: Region { start_line: line, start_column: column },
-                                },
-                            }],
-                            properties: ResultProperties {
-                                harness: harness.pretty_name.clone(),
-                                property_name: Some(prop.property_name()),
-                            },
-                        });
+                            format!("[{}] {}", harness.pretty_name, prop.description),
+                            harness.pretty_name.clone(),
+                            Some(prop.property_name()),
+                            location,
+                        ));
                     }
                 }
                 Err(exit_status) => {
@@ -188,26 +201,18 @@ impl SarifLog {
                         short_description: Message { text: desc.to_string() },
                     });
 
-                    sarif_results.push(SarifResult {
-                        rule_id: rule_id.to_string(),
-                        level: "error",
-                        message: Message { text: format!("[{}] {desc}", harness.pretty_name) },
-                        locations: vec![Location {
-                            physical_location: PhysicalLocation {
-                                artifact_location: ArtifactLocation {
-                                    uri: relativize_path(&harness.original_file),
-                                },
-                                region: Region {
-                                    start_line: harness.original_start_line as u32,
-                                    start_column: None,
-                                },
-                            },
-                        }],
-                        properties: ResultProperties {
-                            harness: harness.pretty_name.clone(),
-                            property_name: None,
-                        },
-                    });
+                    sarif_results.push(sarif_result(
+                        rule_id.to_string(),
+                        "error",
+                        format!("[{}] {desc}", harness.pretty_name),
+                        harness.pretty_name.clone(),
+                        None,
+                        (
+                            relativize_path(&harness.original_file),
+                            harness.original_start_line as u32,
+                            None,
+                        ),
+                    ));
                 }
             }
         }
@@ -250,16 +255,11 @@ fn exit_status_rule(exit_status: &ExitStatus) -> (&'static str, &'static str) {
 }
 
 fn best_location(prop: &Property) -> Option<(String, u32, Option<u32>)> {
-    if let Some(loc) = location_from_source_location(&prop.source_location) {
-        return Some(loc);
-    }
-
-    prop.trace.as_ref().and_then(|trace| trace.iter().rev().find_map(trace_item_location))
-}
-
-fn trace_item_location(item: &TraceItem) -> Option<(String, u32, Option<u32>)> {
-    let loc = item.source_location.as_ref()?;
-    location_from_source_location(loc)
+    location_from_source_location(&prop.source_location).or_else(|| {
+        prop.trace.as_ref()?.iter().rev().find_map(|item| {
+            item.source_location.as_ref().and_then(location_from_source_location)
+        })
+    })
 }
 
 fn location_from_source_location(loc: &SourceLocation) -> Option<(String, u32, Option<u32>)> {
@@ -270,13 +270,10 @@ fn location_from_source_location(loc: &SourceLocation) -> Option<(String, u32, O
 }
 
 fn relativize_path(file: &str) -> String {
-    let file_path = PathBuf::from(file);
     let Ok(cur_dir) = env::current_dir() else { return file.to_string() };
-
-    diff_paths(file_path, cur_dir)
-        .unwrap_or_else(|| PathBuf::from(file))
-        .to_string_lossy()
-        .into_owned()
+    diff_paths(file, cur_dir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| file.to_string())
 }
 
 #[cfg(test)]

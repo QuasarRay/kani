@@ -28,7 +28,7 @@ pub fn krate_trimmed_path(krate: &Path) -> String {
 
 impl AggrResult {
     pub fn new(krate: PathBuf, iqr_stats: Stats, full_stats: Stats) -> Self {
-        AggrResult { krate_trimmed_path: krate_trimmed_path(&krate), krate, iqr_stats, full_stats }
+        Self { krate_trimmed_path: krate_trimmed_path(&krate), krate, iqr_stats, full_stats }
     }
 
     pub fn full_std_dev(&self) -> Duration {

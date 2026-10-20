@@ -86,8 +86,8 @@ pub enum HarnessKind {
 
 impl HarnessAttributes {
     /// Create a new harness of the provided kind.
-    pub fn new(kind: HarnessKind) -> HarnessAttributes {
-        HarnessAttributes {
+    pub fn new(kind: HarnessKind) -> Self {
+        Self {
             kind,
             should_panic: false,
             solver: None,
@@ -114,13 +114,7 @@ impl HarnessMetadata {
     /// get the unqualifed (i.e. without ::) harness name. If the
     /// harness name contains ::, then we use rightmost name..
     pub fn get_harness_name_unqualified(&self) -> &str {
-        const PATH_SEPARATOR: &str = "::";
-        if let Some(last_separator) = self.pretty_name.rfind(PATH_SEPARATOR) {
-            let name_start = last_separator + PATH_SEPARATOR.len();
-            &self.pretty_name[name_start..]
-        } else {
-            &self.pretty_name
-        }
+        self.pretty_name.rsplit_once("::").map_or(self.pretty_name.as_str(), |(_, name)| name)
     }
 }
 
@@ -138,31 +132,25 @@ where
 {
     debug!(?targets, "find_proof_harness");
     let mut result = vec![];
-    for md in all_harnesses.into_iter() {
+    for md in all_harnesses {
         let md: &'a HarnessMetadata = md.borrow();
 
         // --harnesses should not select automatic harnesses
         if md.is_automatically_generated {
             continue;
         }
-        if exact_filter {
-            // Check for exact match only
-            if targets.contains(&md.pretty_name) {
-                // if exact match found, stop searching
-                result.push(md);
-            } else {
-                trace!(skip = md.pretty_name, "find_proof_harnesses");
-            }
+        let matches = if exact_filter {
+            targets.contains(&md.pretty_name)
         } else {
             // Either an exact match, or a substring match. We check the exact first since it's cheaper.
-            if targets.contains(&md.pretty_name)
+            targets.contains(&md.pretty_name)
                 || targets.contains(&md.get_harness_name_unqualified().to_string())
                 || targets.iter().any(|target| md.pretty_name.contains(*target))
-            {
-                result.push(md);
-            } else {
-                trace!(skip = md.pretty_name, "find_proof_harnesses");
-            }
+        };
+        if matches {
+            result.push(md);
+        } else {
+            trace!(skip = md.pretty_name, "find_proof_harnesses");
         }
     }
     result

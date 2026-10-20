@@ -210,94 +210,60 @@ impl ValidateArgs for CommonAutoharnessArgs {
 
 impl ValidateArgs for CargoAutoharnessArgs {
     fn validate(&self) -> Result<(), Error> {
-        self.common_autoharness_args.validate()?;
-        self.verify_opts.validate()?;
-        if !self.verify_opts.common_args.unstable_features.contains(UnstableFeature::Autoharness) {
-            return Err(Error::raw(
-                ErrorKind::MissingRequiredArgument,
-                format!(
-                    "The `autoharness` subcommand is unstable and requires -Z {}",
-                    UnstableFeature::Autoharness
-                ),
-            ));
-        }
-
-        if self.common_autoharness_args.list
-            && self.common_autoharness_args.format == Format::Pretty
-            && self.verify_opts.common_args.quiet
-        {
-            return Err(Error::raw(
-                ErrorKind::ArgumentConflict,
-                "The `--quiet` flag is not compatible with the `pretty` format, since `pretty` prints to the terminal. Either specify a different format or don't pass `--quiet`.",
-            ));
-        }
-
-        if self
-            .verify_opts
-            .common_args
-            .unstable_features
-            .contains(UnstableFeature::ConcretePlayback)
-        {
-            return Err(Error::raw(
-                ErrorKind::ArgumentConflict,
-                "The autoharness subcommand does not support concrete playback",
-            ));
-        }
-
-        Ok(())
+        validate_autoharness(&self.common_autoharness_args, &self.verify_opts, || Ok(()))
     }
 }
 
 impl ValidateArgs for StandaloneAutoharnessArgs {
     fn validate(&self) -> Result<(), Error> {
-        self.common_autoharness_args.validate()?;
-        self.verify_opts.validate()?;
-        if !self.verify_opts.common_args.unstable_features.contains(UnstableFeature::Autoharness) {
-            return Err(Error::raw(
-                ErrorKind::MissingRequiredArgument,
-                format!(
-                    "The `autoharness` subcommand is unstable and requires -Z {}",
-                    UnstableFeature::Autoharness
-                ),
-            ));
-        }
-
-        if self.common_autoharness_args.list
-            && self.common_autoharness_args.format == Format::Pretty
-            && self.verify_opts.common_args.quiet
-        {
-            return Err(Error::raw(
-                ErrorKind::ArgumentConflict,
-                "The `--quiet` flag is not compatible with the `pretty` format, since `pretty` prints to the terminal. Either specify a different format or don't pass `--quiet`.",
-            ));
-        }
-
-        if self.std {
-            validate_std_path(&self.input)?;
-        } else if !self.input.is_file() {
-            return Err(Error::raw(
-                ErrorKind::InvalidValue,
-                format!(
-                    "Invalid argument: Input invalid. `{}` is not a regular file.",
-                    self.input.display()
-                ),
-            ));
-        }
-
-        if self
-            .verify_opts
-            .common_args
-            .unstable_features
-            .contains(UnstableFeature::ConcretePlayback)
-        {
-            return Err(Error::raw(
-                ErrorKind::ArgumentConflict,
-                "The autoharness subcommand does not support concrete playback",
-            ));
-        }
-
-        Ok(())
+        validate_autoharness(&self.common_autoharness_args, &self.verify_opts, || {
+            if self.std {
+                validate_std_path(&self.input)
+            } else if self.input.is_file() {
+                Ok(())
+            } else {
+                Err(Error::raw(
+                    ErrorKind::InvalidValue,
+                    format!(
+                        "Invalid argument: Input invalid. `{}` is not a regular file.",
+                        self.input.display()
+                    ),
+                ))
+            }
+        })
     }
+}
+
+fn validate_autoharness(
+    common: &CommonAutoharnessArgs,
+    verify: &VerificationArgs,
+    validate_target: impl FnOnce() -> Result<(), Error>,
+) -> Result<(), Error> {
+    common.validate()?;
+    verify.validate()?;
+    if !verify.common_args.unstable_features.contains(UnstableFeature::Autoharness) {
+        return Err(Error::raw(
+            ErrorKind::MissingRequiredArgument,
+            format!(
+                "The `autoharness` subcommand is unstable and requires -Z {}",
+                UnstableFeature::Autoharness
+            ),
+        ));
+    }
+    if common.list && common.format == Format::Pretty && verify.common_args.quiet {
+        return Err(Error::raw(
+            ErrorKind::ArgumentConflict,
+            "The `--quiet` flag is not compatible with the `pretty` format, since `pretty` prints to the terminal. Either specify a different format or don't pass `--quiet`.",
+        ));
+    }
+    validate_target()?;
+    if verify.common_args.unstable_features.contains(UnstableFeature::ConcretePlayback) {
+        return Err(Error::raw(
+            ErrorKind::ArgumentConflict,
+            "The autoharness subcommand does not support concrete playback",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

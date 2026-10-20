@@ -87,9 +87,9 @@ fn bundle_kani(dir: &Path) -> Result<()> {
 
     // 1. Kani binaries
     let release = Path::new("./target/release");
-    cp(&release.join("kani-driver"), &bin)?;
-    cp(&release.join("kani-compiler"), &bin)?;
-    cp(&release.join("kani-cov"), &bin)?;
+    for name in ["kani-driver", "kani-compiler", "kani-cov"] {
+        cp(&release.join(name), &bin)?;
+    }
 
     // 2. Kani scripts
     let scripts = dir.join("scripts");
@@ -118,40 +118,19 @@ fn bundle_kani(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Copy CBMC files into `dir`
+/// Copy the CBMC binaries selected by the release environment's PATH into `dir`.
 fn bundle_cbmc(dir: &Path) -> Result<()> {
-    // In an effort to avoid creating new places where we must specify the exact version
-    // of CBMC in use, we use the version in PATH here. This isn't ideal because it means
-    // our release script is not standalone in determining how the release bundle is created.
-    // We depend on other scripts to set up our environment correctly first.
-    // This means it's possible to erroneously use this script, which is not ideal. Fool-proof is best.
-    // But the best fix would involve changing our CI process to do something like
-    // "build-kani" and then using *that* to run the test suite.
-    // That way, we could just specify here what versions to use, and not need it in other places.
-
-    // I felt that would be too invasive of a change to make at this time, so we'll start
-    // with this approach and refactor it later.
-
-    let bin = dir.join("bin");
-
-    // We use these directly
-    cp(&which::which("cbmc")?, &bin)?;
-    cp(&which::which("goto-instrument")?, &bin)?;
-    cp(&which::which("goto-cc")?, &bin)?;
-    cp(&which::which("goto-analyzer")?, &bin)?;
-
-    Ok(())
+    bundle_path_tools(dir, &["cbmc", "goto-instrument", "goto-cc", "goto-analyzer"])
 }
 
-/// Copy Kissat binary into `dir`
+/// Copy Kissat binary into `dir`.
 fn bundle_kissat(dir: &Path) -> Result<()> {
-    // Assumes `kissat` exists in PATH (similar to `bundle_cbmc`)
+    bundle_path_tools(dir, &["kissat"])
+}
+
+fn bundle_path_tools(dir: &Path, tools: &[&str]) -> Result<()> {
     let bin = dir.join("bin");
-
-    // We use these directly
-    cp(&which::which("kissat")?, &bin)?;
-
-    Ok(())
+    tools.iter().try_for_each(|tool| cp(&which::which(*tool)?, &bin))
 }
 
 /// Create the release tarball from `./dir` named `bundle`.
@@ -193,9 +172,7 @@ fn cp(src: &Path, dst: &Path) -> Result<()> {
 
 /// Record version of rustc being used to build Kani
 fn get_rustc_version() -> Result<String> {
-    let output = Command::new("rustc").arg("--version").output();
-    let rustc_version = String::from_utf8(output.unwrap().stdout)?;
-    Ok(rustc_version)
+    Ok(String::from_utf8(Command::new("rustc").arg("--version").output().unwrap().stdout)?)
 }
 
 /// Copy files from `src` to  `dst` that respect the given pattern.

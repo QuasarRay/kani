@@ -11,7 +11,6 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
-use crate::{merge, report, summary};
 
 /// We define three subcommands:
 ///  * `merge` for merging raw Kani coverage results (AKA "kaniraw" files)
@@ -122,18 +121,11 @@ pub enum ReportFormat {
     Escapes,
 }
 
-/// Validate general arguments and delegate validation of command-specific
-/// arguments.
+/// Validate general arguments.
 pub fn validate_args(args: &Args) -> Result<()> {
-    if args.command.is_none() {
+    if args.command.is_some() {
+        Ok(())
+    } else {
         bail!("subcommand needs to be specified (`merge`, `summary` or `report`)")
     }
-
-    match args.command.as_ref().unwrap() {
-        Subcommand::Merge(merge_args) => merge::validate_merge_args(merge_args)?,
-        Subcommand::Summary(summary_args) => summary::validate_summary_args(summary_args)?,
-        Subcommand::Report(report_args) => report::validate_report_args(report_args)?,
-    };
-
-    Ok(())
 }

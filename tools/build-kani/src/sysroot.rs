@@ -20,15 +20,6 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-macro_rules! path_buf {
-    // The arguments are expressions that can be pushed to the PathBuf.
-    ($base_path:expr, $($extra_path:expr),+) => {{
-        let mut path_buf = PathBuf::from($base_path);
-        $(path_buf.push($extra_path);)+
-        path_buf
-    }};
-}
-
 #[cfg(target_os = "linux")]
 fn lib_extension() -> &'static str {
     "so"
@@ -47,22 +38,22 @@ pub fn kani_sysroot() -> PathBuf {
 
 /// Returns the path to where Kani and std pre-compiled libraries are stored.
 pub fn kani_sysroot_lib() -> PathBuf {
-    path_buf!(kani_sysroot(), "lib")
+    kani_sysroot().join("lib")
 }
 
 /// Returns the path to where Kani libraries for concrete playback is kept.
 pub fn kani_playback_lib() -> PathBuf {
-    path_buf!(kani_sysroot(), "playback/lib")
+    kani_sysroot().join("playback/lib")
 }
 
 /// Returns the path to where Kani libraries for no_core is kept.
 pub fn kani_no_core_lib() -> PathBuf {
-    path_buf!(kani_sysroot(), "no_core/lib")
+    kani_sysroot().join("no_core/lib")
 }
 
 /// Returns the path to where Kani's pre-compiled binaries are stored.
 fn kani_sysroot_bin() -> PathBuf {
-    path_buf!(kani_sysroot(), "bin")
+    kani_sysroot().join("bin")
 }
 
 /// Returns the build target
@@ -190,7 +181,7 @@ fn copy_artifacts(artifacts: &[Artifact], sysroot_lib: &Path, copy_std: bool) ->
 
     //  Copy standard libraries into rustlib/<target>/lib/ folder.
     if copy_std {
-        let std_path = path_buf!(&sysroot_lib, "rustlib", build_target(), "lib");
+        let std_path = sysroot_lib.join("rustlib").join(build_target()).join("lib");
         fs::create_dir_all(&std_path).unwrap_or_else(|_| panic!("Failed to create {std_path:?}"));
         copy_libs(artifacts, &std_path, &is_std_lib);
     }

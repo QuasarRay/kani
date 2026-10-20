@@ -29,13 +29,10 @@ pub fn crate_name(path: &Path) -> String {
 /// Given a path of some sort (usually from argv0), this attempts to extract the basename / stem
 /// of the executable. e.g. "/path/foo -> foo" "./foo.exe -> foo" "foo -> foo"
 pub fn executable_basename(argv0: &Option<&OsString>) -> Option<OsString> {
-    if let Some(path) = argv0 {
-        let basename = Path::new(&path).file_stem();
-        if let Some(stem) = basename {
-            return Some(stem.to_os_string());
-        }
-    }
-    None
+    argv0
+        .as_ref()
+        .and_then(|path| Path::new(*path).file_stem())
+        .map(|stem| stem.to_os_string())
 }
 
 /// Render a Command as a string, to log it (e.g. in dry runs)

@@ -31,7 +31,6 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use std::env;
 use std::os::unix::process::ExitStatusExt;
-use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdout};
 
@@ -247,20 +246,20 @@ impl SourceLocation {
 ///    attribute was formatted.
 impl std::fmt::Display for SourceLocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if let Some(file) = self.file.clone() {
+        if let Some(file) = self.file.as_deref() {
             let file_path = filepath(file);
             write!(f, "{file_path}")?;
-            if let Some(line) = self.line.clone() {
+            if let Some(line) = self.line.as_deref() {
                 write!(f, ":{line}")?;
-                if let Some(column) = self.column.clone() {
+                if let Some(column) = self.column.as_deref() {
                     write!(f, ":{column}")?;
                 }
             }
         } else {
             write!(f, "Unknown file")?;
         }
-        if let Some(function) = self.function.clone() {
-            let demangled_function = demangle(&function);
+        if let Some(function) = self.function.as_deref() {
+            let demangled_function = demangle(function);
             write!(f, " in function {demangled_function:#}")?;
         }
         Ok(())
@@ -268,16 +267,11 @@ impl std::fmt::Display for SourceLocation {
 }
 
 /// Returns a path relative to the current working directory.
-fn filepath(file: String) -> String {
-    let file_path = PathBuf::from(file.clone());
+fn filepath(file: &str) -> String {
     let cur_dir = env::current_dir().unwrap();
-
-    let diff_path_opt = diff_paths(file_path, cur_dir);
-    if let Some(diff_path) = diff_path_opt {
-        diff_path.into_os_string().into_string().unwrap()
-    } else {
-        file
-    }
+    diff_paths(file, cur_dir)
+        .map(|path| path.into_os_string().into_string().unwrap())
+        .unwrap_or_else(|| file.to_string())
 }
 
 /// Struct that represents traces.
@@ -394,7 +388,7 @@ struct Parser {
 
 impl Parser {
     fn new() -> Self {
-        Parser { input_so_far: String::new() }
+        Self { input_so_far: String::new() }
     }
 
     /// Triggers an action based on the input:
@@ -406,7 +400,7 @@ impl Parser {
     ///    that we'll always get an item when we attempt to process an item.
     ///
     /// This has be updated if the output format changes at some point.
-    fn triggers_action(&self, input: String) -> Option<Action> {
+    fn triggers_action(&self, input: &str) -> Option<Action> {
         if input.starts_with('[') || input.starts_with(']') {
             // We don't expect any other characters (except '\n') to appear
             // after '[' or ']'. The assert below ensures we won't ignore them.
@@ -426,22 +420,17 @@ impl Parser {
 
     /// Performs an action. In both cases, the input is cleared.
     fn do_action(&mut self, action: Action) -> Option<ParserItem> {
-        match action {
-            Action::ClearInput => {
-                self.clear_input();
-                None
-            }
-            Action::ProcessItem => {
-                let item = self.parse_item();
-                self.clear_input();
-                Some(item)
-            }
-        }
+        let item = match action {
+            Action::ClearInput => None,
+            Action::ProcessItem => Some(self.parse_item()),
+        };
+        self.clear_input();
+        item
     }
 
     // Adds a string to the input accumulated so far
-    fn add_to_input(&mut self, input: String) {
-        self.input_so_far.push_str(&input);
+    fn add_to_input(&mut self, input: &str) {
+        self.input_so_far.push_str(input);
     }
 
     // Returns a `ParserItem` from the input we have accumulated so far. Since
@@ -473,21 +462,14 @@ impl Parser {
                 serde_json::from_str(string_without_delimiter);
             result_item.unwrap();
         }
-        let complete_string = &self.input_so_far[0..self.input_so_far.len()];
-        let result_item: Result<ParserItem, _> = serde_json::from_str(complete_string);
-        result_item.unwrap()
+        serde_json::from_str(&self.input_so_far).unwrap()
     }
 
     /// Processes a line to determine if an action must be triggered.
     /// The action may result in a `ParserItem`, which is then returned.
     fn process_line(&mut self, input: String) -> Option<ParserItem> {
-        self.add_to_input(input.clone());
-        let action_required = self.triggers_action(input);
-        if let Some(action) = action_required {
-            let possible_item = self.do_action(action);
-            return possible_item;
-        }
-        None
+        self.add_to_input(&input);
+        self.triggers_action(&input).and_then(|action| self.do_action(action))
     }
 
     /// Read the process output and return when an item is found in the output
@@ -499,20 +481,13 @@ impl Parser {
         loop {
             let mut input = String::new();
             match buffer.read_line(&mut input).await {
-                Ok(len) => {
-                    if len == 0 {
-                        return None;
-                    }
-                    let item = self.process_line(input);
-                    if item.is_some() {
-                        return item;
-                    } else {
-                        continue;
+                Ok(0) => return None,
+                Ok(_) => {
+                    if let Some(item) = self.process_line(input) {
+                        return Some(item);
                     }
                 }
-                Err(error) => {
-                    panic!("Error: Got error {error} while parsing the output.");
-                }
+                Err(error) => panic!("Error: Got error {error} while parsing the output."),
             }
         }
     }
@@ -569,40 +544,21 @@ pub async fn process_cbmc_output(
 /// Takes (by ownership) a vector of messages, and returns that vector with the `Result`
 /// (if any) removed from it and returned separately.
 pub fn extract_results(mut items: Vec<ParserItem>) -> (Vec<ParserItem>, Option<Vec<Property>>) {
-    let result_idx = items.iter().position(|x| matches!(x, ParserItem::Result { .. }));
-    if let Some(result_idx) = result_idx {
-        let result = items.remove(result_idx);
-        if let ParserItem::Result { result } = result {
-            (items, Some(result))
-        } else {
-            unreachable!() // We filtered for this to be true
-        }
-    } else {
-        // No results
-        (items, None)
-    }
+    let Some(idx) = items.iter().position(|item| matches!(item, ParserItem::Result { .. })) else {
+        return (items, None);
+    };
+    let ParserItem::Result { result } = items.remove(idx) else { unreachable!() };
+    (items, Some(result))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn check_property_id_deserialization_general() {
-        let prop_id_string = "\"alloc::raw_vec::RawVec::<u8>::allocate_in.sanity_check.1\"";
-        let prop_id_result: Result<PropertyId, serde_json::Error> =
-            serde_json::from_str(prop_id_string);
-        let prop_id = prop_id_result.unwrap();
-        assert_eq!(
-            prop_id.fn_name,
-            Some(String::from("alloc::raw_vec::RawVec::<u8>::allocate_in"))
-        );
-        assert_eq!(prop_id.class, String::from("sanity_check"));
-        assert_eq!(prop_id.id, 1);
-
-        let dummy_prop = Property {
-            description: "".to_string(),
-            property_id: prop_id,
+    fn dummy_property(property_id: PropertyId) -> Property {
+        Property {
+            description: String::new(),
+            property_id,
             source_location: SourceLocation {
                 function: None,
                 file: None,
@@ -612,8 +568,30 @@ mod tests {
             status: CheckStatus::Success,
             reach: None,
             trace: None,
-        };
-        assert_eq!(dummy_prop.property_name(), prop_id_string[1..prop_id_string.len() - 1]);
+        }
+    }
+
+    fn assert_property_id(
+        input: &str,
+        fn_name: Option<&str>,
+        class: &str,
+        property_name: &str,
+    ) {
+        let id: PropertyId = serde_json::from_str(input).unwrap();
+        assert_eq!(id.fn_name.as_deref(), fn_name);
+        assert_eq!(id.class, class);
+        assert_eq!(id.id, 1);
+        assert_eq!(dummy_property(id).property_name(), property_name);
+    }
+
+    #[test]
+    fn check_property_id_deserialization_general() {
+        assert_property_id(
+            "\"alloc::raw_vec::RawVec::<u8>::allocate_in.sanity_check.1\"",
+            Some("alloc::raw_vec::RawVec::<u8>::allocate_in"),
+            "sanity_check",
+            "alloc::raw_vec::RawVec::<u8>::allocate_in.sanity_check.1",
+        );
     }
 
     #[test]
@@ -630,19 +608,7 @@ mod tests {
         assert_eq!(prop_id.class, "missing_definition");
         assert_eq!(prop_id.id, 1);
 
-        let dummy_prop = Property {
-            description: "".to_string(),
-            property_id: prop_id,
-            source_location: SourceLocation {
-                function: None,
-                file: None,
-                column: None,
-                line: None,
-            },
-            status: CheckStatus::Success,
-            reach: None,
-            trace: None,
-        };
+        let dummy_prop = dummy_property(prop_id);
         assert_eq!(
             dummy_prop.property_name(),
             "alloc::raw_vec::RawVec::<u8>::allocate_in.missing_definition.1"
@@ -651,85 +617,21 @@ mod tests {
 
     #[test]
     fn check_property_id_deserialization_only_class() {
-        let prop_id_string = "\"assertion.1\"";
-        let prop_id_result: Result<PropertyId, serde_json::Error> =
-            serde_json::from_str(prop_id_string);
-        let prop_id = prop_id_result.unwrap();
-        assert_eq!(prop_id.fn_name, None);
-        assert_eq!(prop_id.class, String::from("assertion"));
-        assert_eq!(prop_id.id, 1);
-
-        let dummy_prop = Property {
-            description: "".to_string(),
-            property_id: prop_id,
-            source_location: SourceLocation {
-                function: None,
-                file: None,
-                column: None,
-                line: None,
-            },
-            status: CheckStatus::Success,
-            reach: None,
-            trace: None,
-        };
-        assert_eq!(dummy_prop.property_name(), prop_id_string[1..prop_id_string.len() - 1]);
+        assert_property_id("\"assertion.1\"", None, "assertion", "assertion.1");
     }
 
     #[test]
     fn check_property_id_deserialization_special() {
-        let prop_id_string = "\".recursion\"";
-        let prop_id_result: Result<PropertyId, serde_json::Error> =
-            serde_json::from_str(prop_id_string);
-        let prop_id = prop_id_result.unwrap();
-        assert_eq!(prop_id.fn_name, None);
-        assert_eq!(prop_id.class, String::from("recursion"));
-        assert_eq!(prop_id.id, 1);
-
-        let dummy_prop = Property {
-            description: "".to_string(),
-            property_id: prop_id,
-            source_location: SourceLocation {
-                function: None,
-                file: None,
-                column: None,
-                line: None,
-            },
-            status: CheckStatus::Success,
-            reach: None,
-            trace: None,
-        };
-        assert_eq!(dummy_prop.property_name(), "recursion.1");
+        assert_property_id("\".recursion\"", None, "recursion", "recursion.1");
     }
 
     #[test]
     fn check_property_id_deserialization_special_name() {
-        let prop_id_string = "\"alloc::raw_vec::RawVec::<u8>::allocate_in.recursion\"";
-        let prop_id_result: Result<PropertyId, serde_json::Error> =
-            serde_json::from_str(prop_id_string);
-        let prop_id = prop_id_result.unwrap();
-        assert_eq!(
-            prop_id.fn_name,
-            Some(String::from("alloc::raw_vec::RawVec::<u8>::allocate_in"))
-        );
-        assert_eq!(prop_id.class, String::from("recursion"));
-        assert_eq!(prop_id.id, 1);
-
-        let dummy_prop = Property {
-            description: "".to_string(),
-            property_id: prop_id,
-            source_location: SourceLocation {
-                function: None,
-                file: None,
-                column: None,
-                line: None,
-            },
-            status: CheckStatus::Success,
-            reach: None,
-            trace: None,
-        };
-        assert_eq!(
-            dummy_prop.property_name(),
-            "alloc::raw_vec::RawVec::<u8>::allocate_in.recursion.1"
+        assert_property_id(
+            "\"alloc::raw_vec::RawVec::<u8>::allocate_in.recursion\"",
+            Some("alloc::raw_vec::RawVec::<u8>::allocate_in"),
+            "recursion",
+            "alloc::raw_vec::RawVec::<u8>::allocate_in.recursion.1",
         );
     }
 

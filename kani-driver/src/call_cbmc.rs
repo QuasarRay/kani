@@ -6,7 +6,6 @@ use kani_metadata::{CbmcSolver, HarnessMetadata};
 use regex::Regex;
 use rustc_demangle::demangle;
 use std::collections::BTreeMap;
-use std::collections::btree_map::Entry;
 use std::ffi::OsString;
 use std::fmt::Write;
 use std::path::Path;
@@ -123,25 +122,24 @@ fn record_cbmc_stat(message: &str, stats: &mut CbmcStats) -> bool {
     let Some((label, value)) = message.split_once(": ") else {
         return false;
     };
-    match label {
-        // "150 steps"
-        "size of program expression" => {
-            stats.size_program_expression =
-                value.strip_suffix(" steps").and_then(|steps| steps.parse().ok());
-            stats.size_program_expression.is_some()
-        }
-        "Runtime Symex" => record_seconds(value, &mut stats.runtime_symex_s),
-        "Runtime Postprocess Equation" => {
-            record_seconds(value, &mut stats.runtime_postprocess_equation_s)
-        }
-        "Runtime Convert SSA" => record_seconds(value, &mut stats.runtime_convert_ssa_s),
-        "Runtime Post-process" => record_seconds(value, &mut stats.runtime_post_process_s),
-        "Runtime Solver" => record_seconds(value, &mut stats.runtime_solver_s),
-        "Runtime decision procedure" => {
-            record_seconds(value, &mut stats.runtime_decision_procedure_s)
-        }
-        _ => false,
+    if label == "size of program expression" {
+        stats.size_program_expression =
+            value.strip_suffix(" steps").and_then(|steps| steps.parse().ok());
+        return stats.size_program_expression.is_some();
     }
+    for (runtime, field) in [
+        ("Runtime Symex", &mut stats.runtime_symex_s),
+        ("Runtime Postprocess Equation", &mut stats.runtime_postprocess_equation_s),
+        ("Runtime Convert SSA", &mut stats.runtime_convert_ssa_s),
+        ("Runtime Post-process", &mut stats.runtime_post_process_s),
+        ("Runtime Solver", &mut stats.runtime_solver_s),
+        ("Runtime decision procedure", &mut stats.runtime_decision_procedure_s),
+    ] {
+        if label == runtime {
+            return record_seconds(value, field);
+        }
+    }
+    false
 }
 
 /// Record a duration CBMC reports as "0.00408627s" or "1.5416e-05s".
@@ -258,31 +256,19 @@ impl KaniSession {
 
         let start_time = Instant::now();
 
-        let res = if let Some(timeout) = self.args.harness_timeout {
-            tokio::time::timeout(
-                timeout.into(),
-                process_cbmc_output(&mut cbmc_process, |i| {
-                    kani_cbmc_output_filter(
-                        i,
-                        self.args.extra_pointer_checks,
-                        self.args.common_args.quiet,
-                        &self.args.output_format(),
-                        self.args.log_file.as_ref(),
-                    )
-                }),
+        let output = process_cbmc_output(&mut cbmc_process, |item| {
+            kani_cbmc_output_filter(
+                item,
+                self.args.extra_pointer_checks,
+                self.args.common_args.quiet,
+                &self.args.output_format(),
+                self.args.log_file.as_ref(),
             )
-            .await
+        });
+        let res = if let Some(timeout) = self.args.harness_timeout {
+            tokio::time::timeout(timeout.into(), output).await
         } else {
-            Ok(process_cbmc_output(&mut cbmc_process, |i| {
-                kani_cbmc_output_filter(
-                    i,
-                    self.args.extra_pointer_checks,
-                    self.args.common_args.quiet,
-                    &self.args.output_format(),
-                    self.args.log_file.as_ref(),
-                )
-            })
-            .await)
+            Ok(output.await)
         };
 
         if let Ok(output) = res {
@@ -370,19 +356,15 @@ impl KaniSession {
 
     /// Just the flags to CBMC that enable property checking of any sort.
     pub fn cbmc_check_flags(&self) -> Vec<OsString> {
-        let mut args = Vec::new();
-
-        // We assume that malloc cannot fail, see https://github.com/model-checking/kani/issues/891
-        args.push("--no-malloc-may-fail".into());
-
-        // With PR #2630 we generate the appropriate checks directly rather than relying on CBMC's
-        // checks (which are for C semantics).
-        args.push("--no-undefined-shift-check".into());
-        // With PR #647 we use Rust's `-C overflow-checks=on` instead of:
-        // --unsigned-overflow-check
-        // --signed-overflow-check
-        // So these options are deliberately skipped to avoid erroneously re-checking operations.
-        args.push("--no-signed-overflow-check".into());
+        // Kani assumes malloc succeeds and generates Rust-specific shift/overflow checks itself
+        // (see #891, #2630 and #647), so disable CBMC's overlapping C checks.
+        let mut args = [
+            "--no-malloc-may-fail",
+            "--no-undefined-shift-check",
+            "--no-signed-overflow-check",
+        ]
+        .map(OsString::from)
+        .to_vec();
 
         if !self.args.checks.memory_safety_on() {
             args.push("--no-bounds-check".into());
@@ -436,37 +418,22 @@ impl KaniSession {
     ) -> Result<()> {
         let solver = self.resolved_solver(harness_solver);
 
-        match solver {
-            CbmcSolver::Bitwuzla => {
-                args.push("--bitwuzla".into());
-            }
-            CbmcSolver::Cadical => {
-                args.push("--sat-solver".into());
-                args.push("cadical".into());
-            }
-            CbmcSolver::Cvc5 => {
-                args.push("--cvc5".into());
-            }
-            CbmcSolver::Kissat => {
-                args.push("--external-sat-solver".into());
-                args.push("kissat".into());
-            }
-            CbmcSolver::Minisat => {
-                // Minisat is currently CBMC's default solver, so no need to
-                // pass any arguments
-            }
-            CbmcSolver::Z3 => {
-                args.push("--z3".into());
-            }
-            CbmcSolver::Binary(solver_binary) => {
-                // Check if the specified binary exists in path
-                if which::which(solver_binary).is_err() {
-                    bail!("the specified solver \"{solver_binary}\" was not found in path")
+        let flags: &[&str] = match solver {
+            CbmcSolver::Bitwuzla => &["--bitwuzla"],
+            CbmcSolver::Cadical => &["--sat-solver", "cadical"],
+            CbmcSolver::Cvc5 => &["--cvc5"],
+            CbmcSolver::Kissat => &["--external-sat-solver", "kissat"],
+            CbmcSolver::Minisat => &[],
+            CbmcSolver::Z3 => &["--z3"],
+            CbmcSolver::Binary(binary) => {
+                if which::which(binary).is_err() {
+                    bail!("the specified solver \"{binary}\" was not found in path")
                 }
-                args.push("--external-sat-solver".into());
-                args.push(solver_binary.into());
+                args.extend([OsString::from("--external-sat-solver"), OsString::from(binary.as_str())]);
+                return Ok(());
             }
-        }
+        };
+        args.extend(flags.iter().copied().map(OsString::from));
         Ok(())
     }
 }
@@ -719,18 +686,11 @@ fn verification_outcome_from_properties(
     should_panic: bool,
 ) -> (VerificationStatus, FailedProperties) {
     let failed_properties = determine_failed_properties(properties);
-    let status = if should_panic {
-        match failed_properties {
-            FailedProperties::Error => VerificationStatus::Failure,
-            FailedProperties::None | FailedProperties::Other => VerificationStatus::Failure,
-            FailedProperties::PanicsOnly => VerificationStatus::Success,
+    let status = match (should_panic, failed_properties) {
+        (true, FailedProperties::PanicsOnly) | (false, FailedProperties::None) => {
+            VerificationStatus::Success
         }
-    } else {
-        match failed_properties {
-            FailedProperties::Error => VerificationStatus::Failure,
-            FailedProperties::None => VerificationStatus::Success,
-            FailedProperties::PanicsOnly | FailedProperties::Other => VerificationStatus::Failure,
-        }
+        _ => VerificationStatus::Failure,
     };
     (status, failed_properties)
 }
@@ -740,32 +700,19 @@ fn determine_failed_properties(properties: &[Property]) -> FailedProperties {
     if properties.iter().any(|prop| prop.status == CheckStatus::Error) {
         return FailedProperties::Error;
     };
-    let failed_properties: Vec<&Property> =
-        properties.iter().filter(|prop| prop.status == CheckStatus::Failure).collect();
-    // Return `FAILURE` if there isn't at least one failed property
-    if failed_properties.is_empty() {
-        FailedProperties::None
+    let mut failed = properties.iter().filter(|prop| prop.status == CheckStatus::Failure);
+    let Some(first) = failed.next() else { return FailedProperties::None };
+    // Panics caused by `panic!` and `assert!` fall into the `assertion` class.
+    if first.property_class() == "assertion"
+        && failed.all(|prop| prop.property_class() == "assertion")
+    {
+        FailedProperties::PanicsOnly
     } else {
-        // Check if all failed properties correspond to the `assertion` class.
-        // Note: Panics caused by `panic!` and `assert!` fall into this class.
-        let all_failed_checks_are_panics =
-            failed_properties.iter().all(|prop| prop.property_class() == "assertion");
-        if all_failed_checks_are_panics {
-            FailedProperties::PanicsOnly
-        } else {
-            FailedProperties::Other
-        }
+        FailedProperties::Other
     }
 }
 
 fn coverage_results_from_properties(properties: &[Property]) -> Option<CoverageResults> {
-    let cov_properties: Vec<&Property> =
-        properties.iter().filter(|p| p.is_code_coverage_property()).collect();
-
-    if cov_properties.is_empty() {
-        return None;
-    }
-
     // Postprocessing the coverage results involves matching on the descriptions
     // of code coverage properties with the `counter_re` regex. These are two
     // real examples of such descriptions:
@@ -792,33 +739,18 @@ fn coverage_results_from_properties(properties: &[Property]) -> Option<CoverageR
 
     let mut coverage_results: BTreeMap<String, Vec<CoverageCheck>> = BTreeMap::default();
 
-    for prop in cov_properties {
-        let mut prop_processed = false;
-        if let Some(captures) = counter_re.captures(&prop.description) {
-            let counter_num = &captures["counter_num"];
-            let function = demangle(&captures["func_name"]).to_string();
-            let status = prop.status;
-            let span = captures["span"].to_string();
-
-            let counter_id = counter_num.parse().unwrap();
-            let term = CoverageTerm::Counter(counter_id);
-            let region = CoverageRegion::from_str(span);
-
-            let cov_check = CoverageCheck::new(function, term, region, status);
-            let file = cov_check.region.file.clone();
-
-            if let Entry::Vacant(e) = coverage_results.entry(file.clone()) {
-                e.insert(vec![cov_check]);
-            } else {
-                coverage_results.entry(file).and_modify(|checks| checks.push(cov_check));
-            }
-            prop_processed = true;
-        }
-
-        assert!(prop_processed, "error: coverage property not processed\n{prop:?}");
+    for prop in properties.iter().filter(|prop| prop.is_code_coverage_property()) {
+        let Some(captures) = counter_re.captures(&prop.description) else {
+            panic!("error: coverage property not processed\n{prop:?}");
+        };
+        let function = demangle(&captures["func_name"]).to_string();
+        let term = CoverageTerm::Counter(captures["counter_num"].parse().unwrap());
+        let region = CoverageRegion::from_str(captures["span"].to_string());
+        let cov_check = CoverageCheck::new(function, term, region, prop.status);
+        coverage_results.entry(cov_check.region.file.clone()).or_default().push(cov_check);
     }
 
-    Some(CoverageResults::new(coverage_results))
+    (!coverage_results.is_empty()).then(|| CoverageResults::new(coverage_results))
 }
 /// Solve Unwind Value from conflicting inputs of unwind values. (--default-unwind, annotation-unwind, --unwind)
 pub fn resolve_unwind_value(

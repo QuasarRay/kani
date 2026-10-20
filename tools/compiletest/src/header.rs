@@ -12,7 +12,7 @@ use tracing::*;
 
 use crate::common::{Config, KaniFailStep, Mode};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TestProps {
     // Extra flags to pass to the compiler
     pub compile_flags: Vec<String>,
@@ -24,24 +24,9 @@ pub struct TestProps {
     pub kani_panic_step: Option<KaniFailStep>,
 }
 
-impl Default for TestProps {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl TestProps {
-    pub fn new() -> Self {
-        TestProps {
-            compile_flags: vec![],
-            kani_flags: vec![],
-            cbmc_flags: vec![],
-            kani_panic_step: None,
-        }
-    }
-
     pub fn from_file(testfile: &Path, config: &Config) -> Self {
-        let mut props = TestProps::new();
+        let mut props = Self::default();
         props.load_from(testfile, config);
         props.kani_flags.extend(config.extra_args.iter().cloned());
         props
@@ -54,16 +39,14 @@ impl TestProps {
             let file = File::open(testfile).unwrap();
 
             iter_header(testfile, file, &mut |ln| {
-                if let Some(flags) = config.parse_compile_flags(ln) {
-                    self.compile_flags.extend(flags.split_whitespace().map(|s| s.to_owned()));
-                }
-
-                if let Some(flags) = config.parse_kani_flags(ln) {
-                    self.kani_flags.extend(flags.split_whitespace().map(|s| s.to_owned()));
-                }
-
-                if let Some(flags) = config.parse_cbmc_flags(ln) {
-                    self.cbmc_flags.extend(flags.split_whitespace().map(|s| s.to_owned()));
+                for (name, target) in [
+                    ("compile-flags", &mut self.compile_flags),
+                    ("kani-flags", &mut self.kani_flags),
+                    ("cbmc-flags", &mut self.cbmc_flags),
+                ] {
+                    if let Some(flags) = config.parse_name_value_directive(ln, name) {
+                        target.extend(flags.split_whitespace().map(str::to_owned));
+                    }
                 }
 
                 if let Some(edition) = config.parse_edition(ln) {
@@ -121,10 +104,6 @@ fn iter_header<R: Read>(testfile: &Path, rdr: R, it: &mut dyn FnMut(&str)) {
 }
 
 impl Config {
-    fn parse_compile_flags(&self, line: &str) -> Option<String> {
-        self.parse_name_value_directive(line, "compile-flags")
-    }
-
     /// Parses strings of the form `kani-*-fail` and returns the step at which
     /// Kani is expected to panic.
     fn parse_kani_step_fail_directive(&self, line: &str) -> Option<KaniFailStep> {
@@ -133,28 +112,18 @@ impl Config {
                 panic!("`kani-{mode}-fail` header is only supported in Kani tests");
             }
         };
-        if self.parse_name_directive(line, "kani-check-fail") {
-            check_kani("check");
-            Some(KaniFailStep::Check)
-        } else if self.parse_name_directive(line, "kani-codegen-fail") {
-            check_kani("codegen");
-            Some(KaniFailStep::Codegen)
-        } else if self.parse_name_directive(line, "kani-verify-fail") {
-            check_kani("verify");
-            Some(KaniFailStep::Verify)
-        } else {
-            None
-        }
-    }
-
-    /// Parses strings of the form `// kani-flags: ...` and returns the options listed after `kani-flags:`
-    fn parse_kani_flags(&self, line: &str) -> Option<String> {
-        self.parse_name_value_directive(line, "kani-flags")
-    }
-
-    /// Parses strings of the form `// cbmc-flags: ...` and returns the options listed after `cbmc-flags:`
-    fn parse_cbmc_flags(&self, line: &str) -> Option<String> {
-        self.parse_name_value_directive(line, "cbmc-flags")
+        [
+            ("kani-check-fail", "check", KaniFailStep::Check),
+            ("kani-codegen-fail", "codegen", KaniFailStep::Codegen),
+            ("kani-verify-fail", "verify", KaniFailStep::Verify),
+        ]
+        .into_iter()
+        .find_map(|(directive, mode, step)| {
+            self.parse_name_directive(line, directive).then(|| {
+                check_kani(mode);
+                step
+            })
+        })
     }
 
     fn parse_name_directive(&self, line: &str, directive: &str) -> bool {
@@ -204,8 +173,7 @@ pub fn make_test_description<R: Read>(
 
         // `file_path` is going to be `tests/kani-fixme/...` so we
         // need to extract the base name if we want to ignore it
-        let test_name: Vec<&str> = file_path.rsplit('/').collect();
-        let base_name = test_name[0];
+        let base_name = file_path.rsplit('/').next().unwrap();
 
         // If the base name does NOT contain "fixme" or "ignore", we skip it.
         // All "fixme" tests are expected to fail
@@ -226,10 +194,8 @@ pub fn make_test_description<R: Read>(
     // The `should-fail` annotation doesn't apply to pretty tests,
     // since we run the pretty printer across all tests by default.
     // If desired, we could add a `should-fail-pretty` annotation.
-    let should_panic = match config.mode {
-        _ if should_fail => test::ShouldPanic::Yes,
-        _ => test::ShouldPanic::No,
-    };
+    let should_panic =
+        if should_fail { test::ShouldPanic::Yes } else { test::ShouldPanic::No };
 
     test::TestDesc {
         name,
